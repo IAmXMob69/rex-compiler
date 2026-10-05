@@ -16,7 +16,7 @@
  * No LLVM. The empire does not rent its code generator.
  */
 
-#define REX_VERSION "0.1.1"
+#define REX_VERSION "0.2.0"
 
 #ifndef REX_PREFIX
 #define REX_PREFIX "/usr/local"
@@ -27,7 +27,8 @@ typedef enum {
     T_RETURN, T_READ, T_IDENT, T_NUM, T_STR,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_SEMI, T_COMMA, T_EQ,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT,
-    T_EQEQ, T_NE, T_LT, T_GT, T_LE, T_GE
+    T_EQEQ, T_NE, T_LT, T_GT, T_LE, T_GE,
+    T_ANDAND, T_OROR, T_BANG
 } TokKind;
 
 typedef struct {
@@ -87,6 +88,7 @@ static int g_lbl;
 static int g_depth;
 static FnCtx *g_fn;
 static char **g_fns;
+static int *g_arity;
 static int g_nfn;
 static int g_err;
 static char g_tmpasm[64];
@@ -278,6 +280,8 @@ static void lex_next(Lexer *L) {
     int col = L->col;
     if (i + 1 < L->len) {
         if (s[i] == '=' && s[i + 1] == '=') { t.kind = T_EQEQ; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
+        if (s[i] == '&' && s[i + 1] == '&') { t.kind = T_ANDAND; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
+        if (s[i] == '|' && s[i + 1] == '|') { t.kind = T_OROR; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
         if (s[i] == '!' && s[i + 1] == '=') { t.kind = T_NE; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
         if (s[i] == '<' && s[i + 1] == '=') { t.kind = T_LE; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
         if (s[i] == '>' && s[i + 1] == '=') { t.kind = T_GE; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
@@ -291,6 +295,7 @@ static void lex_next(Lexer *L) {
         case ';': k = T_SEMI; break;
         case ',': k = T_COMMA; break;
         case '=': k = T_EQ; break;
+        case '!': k = T_BANG; break;
         case '+': k = T_PLUS; break;
         case '-': k = T_MINUS; break;
         case '*': k = T_STAR; break;
@@ -318,6 +323,21 @@ static void expect(Lexer *L, TokKind k, const char *what) {
 
 static Node *parse_expr(Lexer *L);
 
+static void parse_args(Lexer *L, Node *call) {
+    expect(L, T_LPAREN, "'('");
+    if (L->tok.kind == T_RPAREN) {
+        lex_next(L);
+        return;
+    }
+    for (;;) {
+        node_add(call, parse_expr(L));
+        if (L->tok.kind != T_COMMA) break;
+        lex_next(L);
+    }
+    expect(L, T_RPAREN, "')'");
+    if (call->nkids > 6) die("line %d: at most 6 arguments", call->line);
+}
+
 static Node *parse_primary(Lexer *L) {
     Token t = L->tok;
     if (t.kind == T_NUM) {
@@ -342,10 +362,9 @@ static Node *parse_primary(Lexer *L) {
         char *name = xstrdup(t.text);
         lex_next(L);
         if (L->tok.kind == T_LPAREN) {
-            lex_next(L);
-            expect(L, T_RPAREN, "')'");
             Node *n = node_new(N_CALL, t.line);
             n->name = name;
+            parse_args(L, n);
             return n;
         }
         Node *n = node_new(N_VAR, t.line);
@@ -364,11 +383,12 @@ static Node *parse_primary(Lexer *L) {
 }
 
 static Node *parse_unary(Lexer *L) {
-    if (L->tok.kind == T_MINUS) {
+    if (L->tok.kind == T_MINUS || L->tok.kind == T_BANG) {
+        int op = L->tok.kind;
         int line = L->tok.line;
         lex_next(L);
         Node *n = node_new(N_UNARY, line);
-        n->op = T_MINUS;
+        n->op = op;
         n->a = parse_unary(L);
         return n;
     }
@@ -420,7 +440,7 @@ static Node *parse_cmp(Lexer *L) {
     return n;
 }
 
-static Node *parse_expr(Lexer *L) {
+static Node *parse_eq(Lexer *L) {
     Node *n = parse_cmp(L);
     while (L->tok.kind == T_EQEQ || L->tok.kind == T_NE) {
         int op = L->tok.kind;
@@ -430,6 +450,34 @@ static Node *parse_expr(Lexer *L) {
         b->op = op;
         b->a = n;
         b->b = parse_cmp(L);
+        n = b;
+    }
+    return n;
+}
+
+static Node *parse_and(Lexer *L) {
+    Node *n = parse_eq(L);
+    while (L->tok.kind == T_ANDAND) {
+        int line = L->tok.line;
+        lex_next(L);
+        Node *b = node_new(N_BIN, line);
+        b->op = T_ANDAND;
+        b->a = n;
+        b->b = parse_eq(L);
+        n = b;
+    }
+    return n;
+}
+
+static Node *parse_expr(Lexer *L) {
+    Node *n = parse_and(L);
+    while (L->tok.kind == T_OROR) {
+        int line = L->tok.line;
+        lex_next(L);
+        Node *b = node_new(N_BIN, line);
+        b->op = T_OROR;
+        b->a = n;
+        b->b = parse_and(L);
         n = b;
     }
     return n;
@@ -505,12 +553,11 @@ static Node *parse_stmt(Lexer *L) {
             return n;
         }
         if (L->tok.kind == T_LPAREN) {
-            lex_next(L);
-            expect(L, T_RPAREN, "')'");
-            expect(L, T_SEMI, "';'");
             Node *n = node_new(N_EXPRSTMT, line);
             Node *c = node_new(N_CALL, line);
             c->name = name;
+            parse_args(L, c);
+            expect(L, T_SEMI, "';'");
             n->a = c;
             return n;
         }
@@ -543,6 +590,20 @@ static Node *parse_program(Lexer *L) {
         fn->name = xstrdup(L->tok.text);
         lex_next(L);
         expect(L, T_LPAREN, "'('");
+        if (L->tok.kind != T_RPAREN) {
+            for (;;) {
+                if (L->tok.kind != T_IDENT) die("line %d: expected parameter name", L->tok.line);
+                Node *param = node_new(N_VAR, L->tok.line);
+                param->name = xstrdup(L->tok.text);
+                node_add(fn, param);
+                lex_next(L);
+                if (L->tok.kind != T_COMMA) break;
+                lex_next(L);
+            }
+        }
+        if (fn->nkids > 6) die("line %d: at most 6 parameters", line);
+        if (strcmp(fn->name, "main") == 0 && fn->nkids != 0)
+            die("line %d: main() takes no parameters", line);
         expect(L, T_RPAREN, "')'");
         fn->a = parse_block(L);
         node_add(p, fn);
@@ -550,17 +611,21 @@ static Node *parse_program(Lexer *L) {
     return p;
 }
 
-static int fn_known(const char *name) {
-    for (int i = 0; i < g_nfn; i++) if (strcmp(g_fns[i], name) == 0) return 1;
-    return 0;
+static int fn_arity(const char *name) {
+    for (int i = 0; i < g_nfn; i++)
+        if (strcmp(g_fns[i], name) == 0) return g_arity[i];
+    return -1;
 }
 
 static void collect_fns(Node *p) {
     g_nfn = p->nkids;
     g_fns = calloc((size_t)g_nfn, sizeof(char *));
+    g_arity = calloc((size_t)g_nfn, sizeof(int));
+    if (!g_fns || !g_arity) die("out of memory");
     int saw_main = 0;
     for (int i = 0; i < p->nkids; i++) {
         g_fns[i] = p->kids[i]->name;
+        g_arity[i] = p->kids[i]->nkids;
         if (strcmp(p->kids[i]->name, "main") == 0) saw_main = 1;
         for (int j = 0; j < i; j++) {
             if (strcmp(g_fns[j], g_fns[i]) == 0)
@@ -677,20 +742,57 @@ static void gen_expr(Node *n) {
         case N_READ:
             emit_call("rex_read_int");
             return;
-        case N_CALL:
-            if (!fn_known(n->name)) die("line %d: unknown function '%s'", n->line, n->name);
+        case N_CALL: {
+            int want = fn_arity(n->name);
+            if (want < 0) die("line %d: unknown function '%s'", n->line, n->name);
             if (strcmp(n->name, "main") == 0) die("line %d: do not call main", n->line);
-            {
-                char sym[128];
-                snprintf(sym, sizeof(sym), "rexfn_%s", n->name);
-                emit_call(sym);
+            if (want != n->nkids)
+                die("line %d: %s() wants %d argument%s, got %d", n->line, n->name, want, want == 1 ? "" : "s", n->nkids);
+            static const char *areg[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+            for (int i = 0; i < n->nkids; i++) {
+                gen_expr(n->kids[i]);
+                emit_push("%rax");
             }
+            for (int i = n->nkids - 1; i >= 0; i--) emit_pop(areg[i]);
+            char sym[128];
+            snprintf(sym, sizeof(sym), "rexfn_%s", n->name);
+            emit_call(sym);
             return;
+        }
         case N_UNARY:
             gen_expr(n->a);
-            emit("    neg %%rax");
+            if (n->op == T_BANG) {
+                emit("    cmp $0, %%rax");
+                emit("    sete %%al");
+                emit("    movzx %%al, %%eax");
+            } else {
+                emit("    neg %%rax");
+            }
             return;
         case N_BIN:
+            if (n->op == T_ANDAND || n->op == T_OROR) {
+                int skip = newlbl();
+                int end = newlbl();
+                gen_expr(n->a);
+                emit("    cmp $0, %%rax");
+                if (n->op == T_ANDAND) {
+                    emit("    je .L%d", end);
+                    gen_expr(n->b);
+                    emit(".L%d:", end);
+                    emit("    cmp $0, %%rax");
+                    emit("    setne %%al");
+                    emit("    movzx %%al, %%eax");
+                } else {
+                    emit("    jne .L%d", skip);
+                    gen_expr(n->b);
+                    emit("    cmp $0, %%rax");
+                    emit("    je .L%d", end);
+                    emit(".L%d:", skip);
+                    emit("    mov $1, %%rax");
+                    emit(".L%d:", end);
+                }
+                return;
+            }
             gen_expr(n->a);
             emit_push("%rax");
             gen_expr(n->b);
@@ -849,6 +951,10 @@ static void gen_fn2(Node *fn) {
     memset(&ctx, 0, sizeof(ctx));
     ctx.name = fn->name;
     ctx.is_main = strcmp(fn->name, "main") == 0;
+    for (int i = 0; i < fn->nkids; i++) {
+        int slot = local_add(&ctx, fn->kids[i]->name, fn->kids[i]->line);
+        ctx.locals[slot].declared = 1;
+    }
     scan_locals(&ctx, fn->a);
     g_fn = &ctx;
     g_depth = 0;
@@ -862,6 +968,11 @@ static void gen_fn2(Node *fn) {
     emit("    push %%rbp");
     emit("    mov %%rsp, %%rbp");
     if (ctx.stack) emit("    sub $%d, %%rsp", ctx.stack);
+    {
+        static const char *areg[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+        for (int i = 0; i < fn->nkids; i++)
+            emit("    mov %s, -%d(%%rbp)", areg[i], ctx.locals[i].offset);
+    }
     gen_stmt(fn->a);
     if (ctx.is_main) emit("    xor %%eax, %%eax");
     else emit("    xor %%eax, %%eax");

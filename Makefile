@@ -46,6 +46,8 @@ test: rex
 	REX_RUNTIME=src/rexrt.c ./rex run examples/branch.rex | cmp - examples/branch.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/functions.rex | cmp - examples/functions.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/elseif.rex | cmp - examples/elseif.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/args.rex | cmp - examples/args.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/logic.rex | cmp - examples/logic.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/use_before.rex > /tmp/rexub.out 2> /tmp/rexub.err; \
 		test $$? -ne 0 && grep -q 'used before declaration' /tmp/rexub.err
 	REX_RUNTIME=src/rexrt.c ./rex run examples/divzero.rex > /tmp/rexdz.out 2> /tmp/rexdz.err; \
