@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<language id="rex" name="REX" version="2.0" _section="Source">
+  <metadata>
+    <property name="mimetypes">text/x-rex</property>
+    <property name="globs">*.rex</property>
+    <property name="line-comment-start">//</property>
+    <property name="block-comment-start">/*</property>
+    <property name="block-comment-end">*/</property>
+  </metadata>
+  <styles>
+    <style id="keyword" name="Keyword" map-to="def:keyword"/>
+    <style id="comment" name="Comment" map-to="def:comment"/>
+    <style id="string" name="String" map-to="def:string"/>
+  </styles>
+  <definitions>
+    <context id="rex" class="no-spell-check">
+      <include>
+        <context id="line-comment" style-ref="comment" end-at-line-end="true" class="comment">
+          <start>//</start>
+        </context>
+        <context id="block-comment" style-ref="comment" class="comment">
+          <start>/\*</start>
+          <end>\*/</end>
+        </context>
+        <context id="string" style-ref="string" end-at-line-end="true" class="string">
+          <start>"</start>
+          <end>"</end>
+        </context>
+        <context id="keyword" style-ref="keyword">
+          <keyword>fn</keyword>
+          <keyword>let</keyword>
+          <keyword>if</keyword>
+          <keyword>else</keyword>
+          <keyword>while</keyword>
+          <keyword>print</keyword>
+          <keyword>exec</keyword>
+          <keyword>return</keyword>
+          <keyword>read</keyword>
+        </context>
+      </include>
+    </context>
+  </definitions>
+</language>

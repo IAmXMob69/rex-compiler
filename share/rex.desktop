@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=REX Compiler
+GenericName=Native compiler
+Comment=Compile and run a REX program in a terminal
+Exec=rex-open %f
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;Building;
+MimeType=text/x-rex;
+Keywords=compiler;rex;arch;

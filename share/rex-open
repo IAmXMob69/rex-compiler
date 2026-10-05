@@ -1,0 +1,7 @@
+#!/bin/sh
+# XFCE launcher. The filename is an argument, never spliced into a shell string.
+if [ $# -lt 1 ]; then
+    echo "usage: rex-open FILE" >&2
+    exit 2
+fi
+exec xfce4-terminal --execute sh -c 'rex run "$1"; echo; printf "[enter] "; read -r _' sh "$1"

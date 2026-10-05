@@ -1,0 +1,62 @@
+# REX — native compiler for Arch / XFCE
+# Imperial standard: base-devel, nothing else.
+
+PREFIX ?= /usr/local
+CC     ?= gcc
+CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-function
+override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
+
+.PHONY: all install uninstall test clean
+
+all: rex
+
+rex: src/rex.c
+	$(CC) $(CFLAGS) -o rex src/rex.c
+	chmod +x rex
+
+install: rex
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -d $(DESTDIR)$(PREFIX)/share/rex
+	install -d $(DESTDIR)$(PREFIX)/share/applications
+	install -d $(DESTDIR)$(PREFIX)/share/mime/packages
+	install -d $(DESTDIR)$(PREFIX)/share/gtksourceview-4/language-specs
+	install -m 755 rex $(DESTDIR)$(PREFIX)/bin/rex
+	install -m 755 share/rex-open $(DESTDIR)$(PREFIX)/bin/rex-open
+	install -m 644 src/rexrt.c $(DESTDIR)$(PREFIX)/share/rex/rexrt.c
+	install -m 644 share/rex.desktop $(DESTDIR)$(PREFIX)/share/applications/rex.desktop
+	install -m 644 share/rex.lang $(DESTDIR)$(PREFIX)/share/gtksourceview-4/language-specs/rex.lang
+	install -m 644 share/rex-mime.xml $(DESTDIR)$(PREFIX)/share/mime/packages/rex.xml
+	@if [ -z "$(DESTDIR)" ] && command -v update-mime-database >/dev/null 2>&1; then \
+		update-mime-database $(PREFIX)/share/mime || true; \
+	fi
+	@echo "installed rex to $(PREFIX)/bin/rex"
+	@echo "runtime: $(PREFIX)/share/rex/rexrt.c"
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/rex
+	rm -f $(DESTDIR)$(PREFIX)/bin/rex-open
+	rm -rf $(DESTDIR)$(PREFIX)/share/rex
+	rm -f $(DESTDIR)$(PREFIX)/share/applications/rex.desktop
+	rm -f $(DESTDIR)$(PREFIX)/share/gtksourceview-4/language-specs/rex.lang
+	rm -f $(DESTDIR)$(PREFIX)/share/mime/packages/rex.xml
+
+test: rex
+	REX_RUNTIME=src/rexrt.c ./rex run examples/arithmetic.rex | cmp - examples/arithmetic.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/loop.rex | cmp - examples/loop.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/branch.rex | cmp - examples/branch.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/functions.rex | cmp - examples/functions.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/elseif.rex | cmp - examples/elseif.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/use_before.rex > /tmp/rexub.out 2> /tmp/rexub.err; \
+		test $$? -ne 0 && grep -q 'used before declaration' /tmp/rexub.err
+	REX_RUNTIME=src/rexrt.c ./rex run examples/divzero.rex > /tmp/rexdz.out 2> /tmp/rexdz.err; \
+		test $$? -eq 1 && grep -q 'division by zero' /tmp/rexdz.err
+	printf '%s\n' 'fn main() { print(7); }' > /tmp/rexstdin.rex
+	rm -f /tmp/rexfifo
+	mkfifo /tmp/rexfifo
+	cat /tmp/rexstdin.rex > /tmp/rexfifo &
+	REX_RUNTIME=src/rexrt.c ./rex asm /tmp/rexfifo | grep -q 'mov $$7'
+	rm -f /tmp/rexfifo
+	@echo "tests passed"
+
+clean:
+	rm -f rex
