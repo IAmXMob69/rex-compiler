@@ -8,6 +8,8 @@ That is the point. chibicc, 8cc, and the Toomey tutorial stop at assembly and ha
 
 It is for Arch Linux. It also has a few XFCE files so Mousepad can color the code and you can open a `.rex` file from the menu.
 
+`examples/rexcomp.rex` is a smaller compiler written in REX. The C compiler builds it. That program compiles its own source, and the assembly matches. The compiler produced by that compile still prints 42 for `examples/stage.rex`. That is a fixed point of the subset compiler. It is not a self-host of `src/rex.c`.
+
 ## What you can write
 
 ```

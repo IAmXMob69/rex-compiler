@@ -90,6 +90,16 @@ test: rex
 	/tmp/rexcomp > /tmp/stage7.s
 	./rex elf /tmp/stage7.s -o /tmp/stage7
 	/tmp/stage7 | cmp - examples/stage7.out
+	cp examples/rexcomp.rex in.rex
+	/tmp/rexcomp > /tmp/self.s
+	./rex elf /tmp/self.s -o /tmp/self2
+	cp examples/rexcomp.rex in.rex
+	/tmp/self2 > /tmp/self3.s
+	cmp /tmp/self.s /tmp/self3.s
+	cp examples/stage.rex in.rex
+	/tmp/self2 > /tmp/stage_self.s
+	./rex elf /tmp/stage_self.s -o /tmp/stage_self
+	/tmp/stage_self | cmp - examples/stage.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/logic.rex | cmp - examples/logic.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/array.rex | cmp - examples/array.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/for.rex | cmp - examples/for.out

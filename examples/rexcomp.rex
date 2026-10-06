@@ -1,3 +1,4 @@
+// subset compiler, fixed point tested
 let pos = 0;
 let lab = 2;
 let nloc = 0;
@@ -21,6 +22,15 @@ fn skip() {
             pos = pos + 1;
             go = 1;
         }
+        if (src[pos] == 47) {
+            if (src[pos + 1] == 47) {
+                while (src[pos] != 10) {
+                    if (src[pos] == 0) { pos = pos + 1; }
+                    if (src[pos] != 0) { pos = pos + 1; }
+                }
+                go = 1;
+            }
+        }
     }
 }
 
@@ -35,6 +45,15 @@ fn namelen() {
                 n = n + 1;
                 i = i + 1;
                 go = 1;
+            }
+        }
+        if (n > 0) {
+            if (src[i] >= 48) {
+                if (src[i] <= 57) {
+                    n = n + 1;
+                    i = i + 1;
+                    go = 1;
+                }
             }
         }
     }
@@ -58,13 +77,16 @@ fn addloc() {
 fn find() {
     let start = pos;
     let n = namelen();
-    let ch = src[start];
     let i = 0;
     while (i < nloc) {
-        if (i < 40) {
-            if (lens[i] == n) {
-                if (firsts[i] == ch) { return i; }
+        if (lens[i] == n) {
+            let k = 0;
+            let same = 1;
+            while (k < n) {
+                if (src[names[i] + k] != src[start + k]) { same = 0; }
+                k = k + 1;
             }
+            if (same == 1) { return i; }
         }
         i = i + 1;
     }
@@ -283,8 +305,31 @@ fn expr() {
         print("    movzx %al, %eax");
         return 0;
     }
+    if (src[pos] == 33) {
+        pos = pos + 1;
+        if (src[pos] == 61) { pos = pos + 1; }
+        print("    push %rax");
+        primary();
+        print("    mov %rax, %rcx");
+        print("    pop %rax");
+        print("    cmp %rcx, %rax");
+        print("    setne %al");
+        print("    movzx %al, %eax");
+        return 0;
+    }
     if (src[pos] == 60) {
         pos = pos + 1;
+        if (src[pos] == 61) {
+            pos = pos + 1;
+            print("    push %rax");
+            primary();
+            print("    mov %rax, %rcx");
+            print("    pop %rax");
+            print("    cmp %rcx, %rax");
+            print("    setle %al");
+            print("    movzx %al, %eax");
+            return 0;
+        }
         print("    push %rax");
         primary();
         print("    mov %rax, %rcx");
@@ -296,6 +341,17 @@ fn expr() {
     }
     if (src[pos] == 62) {
         pos = pos + 1;
+        if (src[pos] == 61) {
+            pos = pos + 1;
+            print("    push %rax");
+            primary();
+            print("    mov %rax, %rcx");
+            print("    pop %rax");
+            print("    cmp %rcx, %rax");
+            print("    setge %al");
+            print("    movzx %al, %eax");
+            return 0;
+        }
         print("    push %rax");
         primary();
         print("    mov %rax, %rcx");
@@ -314,6 +370,8 @@ fn stmt() {
     if (src[pos] == 125) { return 0; }
     if (src[pos] == 108) {
         if (src[pos + 1] == 101) {
+            if (src[pos + 2] == 116) {
+                if (src[pos + 3] < 97) {
             pos = pos + 4;
             let off = addloc();
             skip();
@@ -324,10 +382,13 @@ fn stmt() {
             print("(%rbp)");
             if (src[pos] == 59) { pos = pos + 1; }
             return 0;
+                }
+            }
         }
     }
     if (src[pos] == 105) {
         if (src[pos + 1] == 102) {
+            if (src[pos + 2] < 97) {
             pos = pos + 2;
             let el = lab;
             let en = lab + 1;
@@ -356,10 +417,13 @@ fn stmt() {
             putn(en);
             print(":");
             return 0;
+            }
         }
     }
     if (src[pos] == 119) {
         if (src[pos + 1] == 104) {
+            if (src[pos + 4] == 101) {
+                if (src[pos + 5] < 97) {
             pos = pos + 5;
             let st = lab;
             let en2 = lab + 1;
@@ -388,19 +452,27 @@ fn stmt() {
             putn(en2);
             print(":");
             return 0;
+                }
+            }
         }
     }
     if (src[pos] == 114) {
         if (src[pos + 1] == 101) {
+            if (src[pos + 5] == 110) {
+                if (src[pos + 6] < 97) {
             pos = pos + 6;
             expr();
             print("    jmp .Lret");
             if (src[pos] == 59) { pos = pos + 1; }
             return 0;
+                }
+            }
         }
     }
     if (src[pos] == 112) {
         if (src[pos + 1] == 114) {
+            if (src[pos + 4] == 116) {
+                if (src[pos + 5] < 97) {
             pos = pos + 5;
             if (src[pos] == 40) { pos = pos + 1; }
             expr();
@@ -410,6 +482,8 @@ fn stmt() {
             if (src[pos] == 41) { pos = pos + 1; }
             if (src[pos] == 59) { pos = pos + 1; }
             return 0;
+                }
+            }
         }
         if (src[pos + 1] == 117) {
             if (src[pos + 3] == 40) {
@@ -449,6 +523,52 @@ fn stmt() {
     let start2 = pos;
     pos = pos + n2;
     skip();
+    if (src[pos] == 40) {
+        pos = pos + 1;
+        skip();
+        if (src[pos] != 41) {
+            expr();
+            print("    push %rax");
+            skip();
+            if (src[pos] == 44) {
+                pos = pos + 1;
+                expr();
+                print("    mov %rax, %rsi");
+            }
+            print("    pop %rdi");
+        }
+        if (src[pos] == 41) { pos = pos + 1; }
+        put("    call rexfn_");
+        let jc = 0;
+        while (jc < n2) {
+            putc(src[start2 + jc]);
+            jc = jc + 1;
+        }
+        print("");
+        if (src[pos] == 59) { pos = pos + 1; }
+        return 0;
+    }
+    if (src[pos] == 91) {
+        pos = pos + 1;
+        expr();
+        print("    push %rax");
+        if (src[pos] == 93) { pos = pos + 1; }
+        skip();
+        if (src[pos] == 61) { pos = pos + 1; }
+        expr();
+        print("    mov %rax, %rdx");
+        print("    pop %rcx");
+        put("    mov rex_g_");
+        let j5 = 0;
+        while (j5 < n2) {
+            putc(src[start2 + j5]);
+            j5 = j5 + 1;
+        }
+        print("(%rip), %rax");
+        print("    mov %rdx, (%rax,%rcx,8)");
+        if (src[pos] == 59) { pos = pos + 1; }
+        return 0;
+    }
     if (src[pos] == 61) { pos = pos + 1; }
     expr();
     if (slot2 < 0) {
@@ -481,13 +601,52 @@ fn main() {
         if (src[pos] == 108) {
             pos = pos + 3;
             skip();
-            pos = pos + namelen();
+            let gs = pos;
+            let gn = namelen();
+            pos = pos + gn;
+            skip();
+            if (src[pos] == 61) {
+                pos = pos + 1;
+                skip();
+                let v = 0;
+                let go = 1;
+                while (go == 1) {
+                    go = 0;
+                    if (src[pos] >= 48) {
+                        if (src[pos] <= 57) {
+                            let d = src[pos] - 48;
+                            v = v * 10;
+                            v = v + d;
+                            pos = pos + 1;
+                            go = 1;
+                        }
+                    }
+                }
+                if (v != 0) {
+                    put("rex_g_");
+                    let k = 0;
+                    while (k < gn) {
+                        putc(src[gs + k]);
+                        k = k + 1;
+                    }
+                    print(":");
+                    put(".quad ");
+                    putn(v);
+                    print("");
+                }
+            }
             while (src[pos] != 59) { pos = pos + 1; }
             pos = pos + 1;
         }
         if (src[pos] == 102) {
+            if (src[pos + 1] == 110) {
+                if (src[pos + 2] < 97) {
             pos = pos + 2;
             skip();
+            while (src[pos] < 97) {
+                if (src[pos] == 40) { pos = pos - 1; }
+                if (src[pos] != 40) { pos = pos + 1; }
+            }
             let ns = pos;
             let nn = namelen();
             if (src[ns] == 109) {
@@ -507,11 +666,9 @@ fn main() {
             print("    mov %rsp, %rbp");
             print("    sub $256, %rsp");
             nloc = 0;
-            while (src[pos] != 40) {
-                if (src[pos] == 123) { pos = pos - 1; }
-                if (src[pos] != 123) { pos = pos + 1; }
-            }
-            pos = pos + 1;
+            pos = pos + nn;
+            skip();
+            if (src[pos] == 40) { pos = pos + 1; }
             skip();
             if (src[pos] != 41) {
                 addloc();
@@ -567,6 +724,8 @@ fn main() {
             print("    mov %rbp, %rsp");
             print("    pop %rbp");
             print("    ret");
+                }
+            }
         }
         skip();
         if (src[pos] != 102) {

@@ -16,7 +16,7 @@
  * No LLVM. The empire does not rent its code generator.
  */
 
-#define REX_VERSION "0.16.0"
+#define REX_VERSION "0.17.0"
 
 #ifndef REX_PREFIX
 #define REX_PREFIX "/usr/local"
