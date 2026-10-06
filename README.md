@@ -1,6 +1,10 @@
 # REX
 
-REX is a small compiler. It turns a `.rex` file into a normal Linux program.
+REX is a small compiler. It turns a `.rex` file into a Linux program.
+
+It writes the program itself. It does not call gcc. It does not call an assembler. The finished file is an ELF that talks to the kernel directly.
+
+That is the point. chibicc, 8cc, and the Toomey tutorial stop at assembly and hand the rest to gcc. c4 interprets. TCC is a real C compiler and it is bigger. REX is not a C compiler. It is a finished compiler for a small language, in two files.
 
 It is for Arch Linux. It also has a few XFCE files so Mousepad can color the code and you can open a `.rex` file from the menu.
 
@@ -16,7 +20,41 @@ fn main() {
 
 That prints 42.
 
-You can use `+ - * / %`, and also `&&`, `||`, and `!`. `&&` and `||` stop early. If the left side of `&&` is 0, the right side does not run. You can use `if`, `else if`, and `while`. Functions can take up to 6 numbers:
+You can use `+ - * / %`, and also `&&`, `||`, and `!`. `&&` and `||` stop early. Functions can take up to 6 numbers.
+
+You can make a fixed list of integers. The length is a constant. Slots start at 0. A bad index stops the program. `len(a)` is the length.
+
+```
+fn main() {
+    let a[3];
+    a[0] = 40;
+    a[1] = 2;
+    a[2] = a[0] + a[1];
+    print(a[2]);
+    print(len(a));
+}
+```
+
+`for` and `while` loop. `break` leaves the loop.
+
+```
+fn main() {
+    let s = 0;
+    for let i = 1; i <= 10; i = i + 1 {
+        s = s + i;
+    }
+    print(s);
+}
+```
+
+A string can be stored and printed. It is not a number.
+
+```
+fn main() {
+    let msg = "REX";
+    print(msg);
+}
+```
 
 ```
 fn add(a, b) {
@@ -24,15 +62,15 @@ fn add(a, b) {
 }
 ```
 
-`main` cannot take arguments. `print` writes a number or some text. `read()` reads a number. `exec("command")` runs a shell command. Do not run a file you did not write.
+`main` cannot take arguments. `print` writes a number or some text. `read()` reads a number. `exec("command")` runs a shell command and waits. Do not run a file you did not write.
 
-A name does not work until its `let` line. Parameters work from the start of the function. `print(x); let x = 5;` is an error. You can only have 64 names in one function. The same name cannot be used twice in one function.
+A name does not work until its `let` line. Parameters work from the start of the function. `print(x); let x = 5;` is an error. You can only have 64 names in one function. The same name cannot be used twice in one function. A name in a `for` belongs to the whole function.
 
-Numbers have to fit in a normal 64-bit signed integer. Divide by zero stops the program and says so.
+Numbers have to fit in a normal 64-bit signed integer. Divide by zero stops the program and says so. Zero prints as 0. A negative number prints with a minus.
 
 ## Install
 
-You need `base-devel`.
+You need a C compiler once, to build REX. After that, REX does not need one.
 
 ```
 sudo pacman -S --needed base-devel
@@ -64,10 +102,11 @@ rex asm examples/functions.rex
 ## Files
 
 - `src/rex.c` is the compiler
-- `src/rexrt.c` is the small helper linked into every program
+- `src/elf.c` is the assembler and the ELF writer
+- `src/rexrt.c` is the old helper. The ELF path does not use it
 - `examples/` has test programs
 - `share/` has the XFCE launcher and the Mousepad color file
 
 ## Limits
 
-No lists. No text except in `print` and `exec`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
+No text values except strings you can store and print. No structs. No pointers you can do math on. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.

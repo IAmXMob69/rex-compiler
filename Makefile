@@ -10,8 +10,8 @@ override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
 
 all: rex
 
-rex: src/rex.c
-	$(CC) $(CFLAGS) -o rex src/rex.c
+rex: src/rex.c src/elf.c
+	$(CC) $(CFLAGS) -o rex src/rex.c src/elf.c
 	chmod +x rex
 
 install: rex
@@ -47,7 +47,14 @@ test: rex
 	REX_RUNTIME=src/rexrt.c ./rex run examples/functions.rex | cmp - examples/functions.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/elseif.rex | cmp - examples/elseif.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/args.rex | cmp - examples/args.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/args6.rex | cmp - examples/args6.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/logic.rex | cmp - examples/logic.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/array.rex | cmp - examples/array.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/for.rex | cmp - examples/for.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/break.rex | cmp - examples/break.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/strings.rex | cmp - examples/strings.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/exec.rex | cmp - examples/exec.out
+	printf '42\n' | REX_RUNTIME=src/rexrt.c ./rex run examples/read.rex | cmp - examples/read.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/use_before.rex > /tmp/rexub.out 2> /tmp/rexub.err; \
 		test $$? -ne 0 && grep -q 'used before declaration' /tmp/rexub.err
 	REX_RUNTIME=src/rexrt.c ./rex run examples/divzero.rex > /tmp/rexdz.out 2> /tmp/rexdz.err; \
