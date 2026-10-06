@@ -33,6 +33,8 @@
           <keyword>else</keyword>
           <keyword>while</keyword>
           <keyword>for</keyword>
+          <keyword>do</keyword>
+          <keyword>enum</keyword>
           <keyword>switch</keyword>
           <keyword>case</keyword>
           <keyword>default</keyword>

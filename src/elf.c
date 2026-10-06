@@ -126,6 +126,7 @@ static void asm_line(char *raw) {
     char name[96], r1[16], r2[16];
 
     if (!strcmp(line, "ret")) { emitb(0xc3); return; }
+    if (!strcmp(line, "call *%rax")) { emitb(0xff); emitb(0xd0); return; }
     if (!strcmp(line, "syscall")) { emitb(0x0f); emitb(0x05); return; }
     if (!strcmp(line, "cqo")) { emitb(0x48); emitb(0x99); return; }
     if (!strcmp(line, "neg %rax")) { emitb(0x48); emitb(0xf7); emitb(0xd8); return; }
@@ -149,6 +150,7 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "mov %rbp, %rsp")) { emitb(0x48); emitb(0x89); emitb(0xec); return; }
     if (!strcmp(line, "mov %rsp, %rsi")) { emitb(0x48); emitb(0x89); emitb(0xe6); return; }
     if (!strcmp(line, "mov %rax, %rcx")) { emitb(0x48); emitb(0x89); emitb(0xc1); return; }
+    if (!strcmp(line, "mov %rcx, %rax")) { emitb(0x48); emitb(0x89); emitb(0xc8); return; }
     if (!strcmp(line, "mov %rax, %rdi")) { emitb(0x48); emitb(0x89); emitb(0xc7); return; }
     if (!strcmp(line, "mov %rdi, %rax")) { emitb(0x48); emitb(0x89); emitb(0xf8); return; }
     if (!strcmp(line, "mov %rax, %rsi")) { emitb(0x48); emitb(0x89); emitb(0xc6); return; }
@@ -183,7 +185,19 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "mov (%rax,%rcx,8), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x04); emitb(0xc8); return; }
     if (!strcmp(line, "mov %rdx, (%rax,%rcx,8)")) { emitb(0x48); emitb(0x89); emitb(0x14); emitb(0xc8); return; }
     if (!strcmp(line, "movzbl (%rax,%rcx), %eax")) { emitb(0x0f); emitb(0xb6); emitb(0x04); emitb(0x08); return; }
+    if (!strcmp(line, "and %rcx, %rax")) { emitb(0x48); emitb(0x21); emitb(0xc8); return; }
     if (!strcmp(line, "add %rcx, %rax")) { emitb(0x48); emitb(0x01); emitb(0xc8); return; }
+    if (!strcmp(line, "or %rcx, %rax")) { emitb(0x48); emitb(0x09); emitb(0xc8); return; }
+    if (!strcmp(line, "xor %rcx, %rax")) { emitb(0x48); emitb(0x31); emitb(0xc8); return; }
+    if (!strcmp(line, "shl %cl, %rax")) { emitb(0x48); emitb(0xd3); emitb(0xe0); return; }
+    if (!strcmp(line, "sar %cl, %rax")) { emitb(0x48); emitb(0xd3); emitb(0xf8); return; }
+    if (!strcmp(line, "not %rax")) { emitb(0x48); emitb(0xf7); emitb(0xd0); return; }
+    if (!strcmp(line, "add $1, %rcx")) { emitb(0x48); emitb(0x83); emitb(0xc1); emitb(0x01); return; }
+    if (!strcmp(line, "sub $1, %rcx")) { emitb(0x48); emitb(0x83); emitb(0xe9); emitb(0x01); return; }
+    if (!strcmp(line, "movzbl (%rax), %edx")) { emitb(0x0f); emitb(0xb6); emitb(0x10); return; }
+    if (!strcmp(line, "movzbl (%rsi), %ecx")) { emitb(0x0f); emitb(0xb6); emitb(0x0e); return; }
+    if (!strcmp(line, "cmp %ecx, %edx")) { emitb(0x39); emitb(0xca); return; }
+    if (!strcmp(line, "test %edx, %edx")) { emitb(0x85); emitb(0xd2); return; }
     if (!strcmp(line, "add $8, %rax")) { emitb(0x48); emitb(0x83); emitb(0xc0); emitb(0x08); return; }
     if (!strcmp(line, "inc %rdi")) { emitb(0x48); emitb(0xff); emitb(0xc7); return; }
     if (!strcmp(line, "imul $8, %rcx")) { emitb(0x48); emitb(0x6b); emitb(0xc9); emitb(0x08); return; }
@@ -268,6 +282,7 @@ static void asm_line(char *raw) {
     if (sscanf(line, "mov %%r9, -%li(%%rbp)", &imm) == 1) { emitb(0x4c); emitb(0x89); emitb(0x8d); emit32((uint32_t)(-imm)); return; }
     if (sscanf(line, "mov %%rax, -%li(%%rbp)", &imm) == 1 && !strstr(line, "%rax)")) { emitb(0x48); emitb(0x89); emitb(0x85); emit32((uint32_t)(-imm)); return; }
     if (sscanf(line, "mov -%li(%%rbp), %%rdi", &imm) == 1 && strstr(line, ", %rdi")) { emitb(0x48); emitb(0x8b); emitb(0xbd); emit32((uint32_t)(-imm)); return; }
+    if (sscanf(line, "mov -%li(%%rbp), %%rcx", &imm) == 1 && strstr(line, ", %rcx")) { emitb(0x48); emitb(0x8b); emitb(0x8d); emit32((uint32_t)(-imm)); return; }
     if (sscanf(line, "mov -%li(%%rbp), %%rax", &imm) == 1 && strstr(line, ", %rax") && !strstr(line, "%rax)")) { emitb(0x48); emitb(0x8b); emitb(0x85); emit32((uint32_t)(-imm)); return; }
     if (sscanf(line, "movq $0, -%li(%%rbp)", &imm) == 1) { emitb(0x48); emitb(0xc7); emitb(0x85); emit32((uint32_t)(-imm)); emit32(0); return; }
     /* disp32 SIB so a 64-slot frame still indexes. */
@@ -336,6 +351,7 @@ static const char *runtime =
     "rex_nl:\n.asciz \"\\n\"\n"
     "rex_minus:\n.asciz \"-\"\n"
     "rex_strlen:\nmov %rdi, %rax\nrex_sl:\ncmpb $0, (%rax)\nje rex_sl_done\ninc %rax\njmp rex_sl\nrex_sl_done:\nsub %rdi, %rax\nret\n"
+    "rex_strcmp:\nmov %rdi, %rax\nrex_sc:\nmovzbl (%rax), %edx\nmovzbl (%rsi), %ecx\ncmp %ecx, %edx\njne rex_sc_ne\ntest %edx, %edx\nje rex_sc_eq\ninc %rax\ninc %rsi\njmp rex_sc\nrex_sc_eq:\nxor %eax, %eax\nret\nrex_sc_ne:\nmov $1, %rax\nret\n"
     "rex_alloc:\npush %rbp\nmov %rsp, %rbp\npush %rdi\nmov $4096, %rsi\nxor %edi, %edi\nmov $3, %rdx\nmov $34, %r10\nmov $-1, %r8\nxor %r9d, %r9d\nmov $9, %rax\nsyscall\npop %rdi\nmov %rdi, (%rax)\nadd $8, %rax\nmov %rbp, %rsp\npop %rbp\nret\n"
     "rex_free:\nsub $8, %rdi\nmov $4096, %rsi\nmov $11, %rax\nsyscall\nret\n"
     "rex_min:\n.asciz \"-9223372036854775808\"\n"
