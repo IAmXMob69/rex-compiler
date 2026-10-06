@@ -16,7 +16,7 @@
  * No LLVM. The empire does not rent its code generator.
  */
 
-#define REX_VERSION "0.15.0"
+#define REX_VERSION "0.16.0"
 
 #ifndef REX_PREFIX
 #define REX_PREFIX "/usr/local"
@@ -1470,8 +1470,8 @@ static void gen_expr(Node *n) {
             int id = str_id++;
             remember_str(id, "index out of range");
             int heap = 0;
-            if (i >= 0 && (g_fn->locals[i].len == -2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs"))) heap = 1;
-            if (g >= 0 && g_globs[g].kind == 2) heap = 1;
+            if (i >= 0 && (g_fn->locals[i].len == -2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs") || !strcmp(n->name, "firsts"))) heap = 1;
+            if (g >= 0 && (g_globs[g].kind == 2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs") || !strcmp(n->name, "firsts"))) heap = 1;
             if (heap) {
                 gen_expr(n->a);
                 emit_push("%rax");
@@ -1904,7 +1904,7 @@ static void gen_stmt(Node *n) {
                 return;
             }
             if (n->b) {
-                if (g_fn->locals[i].len == -2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs")) {
+                if (g_fn->locals[i].len == -2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs") || !strcmp(n->name, "firsts") || glob_find(n->name) >= 0 && (!strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs") || !strcmp(n->name, "firsts"))) {
                     gen_expr(n->b);
                     emit_push("%rax");
                     gen_expr(n->a);

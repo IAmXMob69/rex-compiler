@@ -159,6 +159,46 @@ fn primary() {
             }
         }
         pos = pos + 1;
+        skip();
+        if (src[pos] != 41) {
+            expr();
+            print("    push %rax");
+            skip();
+            if (src[pos] == 44) {
+                pos = pos + 1;
+                expr();
+                print("    push %rax");
+                skip();
+                if (src[pos] == 44) {
+                    pos = pos + 1;
+                    expr();
+                    print("    push %rax");
+                    skip();
+                    if (src[pos] == 44) {
+                        pos = pos + 1;
+                        expr();
+                        print("    push %rax");
+                        skip();
+                        if (src[pos] == 44) {
+                            pos = pos + 1;
+                            expr();
+                            print("    push %rax");
+                            skip();
+                            if (src[pos] == 44) {
+                                pos = pos + 1;
+                                expr();
+                                print("    mov %rax, %r9");
+                            }
+                            print("    pop %r8");
+                        }
+                        print("    pop %rcx");
+                    }
+                    print("    pop %rdx");
+                }
+                print("    pop %rsi");
+            }
+            print("    pop %rdi");
+        }
         if (src[pos] == 41) { pos = pos + 1; }
         put("    call rexfn_");
         let j = 0;
@@ -467,6 +507,51 @@ fn main() {
             print("    mov %rsp, %rbp");
             print("    sub $256, %rsp");
             nloc = 0;
+            while (src[pos] != 40) {
+                if (src[pos] == 123) { pos = pos - 1; }
+                if (src[pos] != 123) { pos = pos + 1; }
+            }
+            pos = pos + 1;
+            skip();
+            if (src[pos] != 41) {
+                addloc();
+                print("    mov %rdi, -8(%rbp)");
+                skip();
+                if (src[pos] == 44) {
+                    pos = pos + 1;
+                    skip();
+                    addloc();
+                    print("    mov %rsi, -16(%rbp)");
+                    skip();
+                    if (src[pos] == 44) {
+                        pos = pos + 1;
+                        skip();
+                        addloc();
+                        print("    mov %rdx, -24(%rbp)");
+                        skip();
+                        if (src[pos] == 44) {
+                            pos = pos + 1;
+                            skip();
+                            addloc();
+                            print("    mov %rcx, -32(%rbp)");
+                            skip();
+                            if (src[pos] == 44) {
+                                pos = pos + 1;
+                                skip();
+                                addloc();
+                                print("    mov %r8, -40(%rbp)");
+                                skip();
+                                if (src[pos] == 44) {
+                                    pos = pos + 1;
+                                    skip();
+                                    addloc();
+                                    print("    mov %r9, -48(%rbp)");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             while (src[pos] != 123) { pos = pos + 1; }
             pos = pos + 1;
             skip();

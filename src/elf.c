@@ -162,6 +162,9 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "mov %rcx, %rsi")) { emitb(0x48); emitb(0x89); emitb(0xce); return; }
     if (!strcmp(line, "mov %rdx, %rax")) { emitb(0x48); emitb(0x89); emitb(0xd0); return; }
     if (!strcmp(line, "mov %rax, %rdx")) { emitb(0x48); emitb(0x89); emitb(0xc2); return; }
+    if (!strcmp(line, "mov %rax, %r8")) { emitb(0x49); emitb(0x89); emitb(0xc0); return; }
+    if (!strcmp(line, "mov %rax, %r9")) { emitb(0x49); emitb(0x89); emitb(0xc1); return; }
+    if (!strcmp(line, "pop %r8")) { emitb(0x41); emitb(0x58); return; }
     if (!strcmp(line, "sub %rdi, %rsi")) { emitb(0x48); emitb(0x29); emitb(0xfe); return; }
     if (!strcmp(line, "sub %rcx, %rdx")) { emitb(0x48); emitb(0x29); emitb(0xca); return; }
     if (!strcmp(line, "mov (%rax), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x00); return; }

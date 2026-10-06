@@ -62,9 +62,34 @@ test: rex
 	REX_RUNTIME=src/rexrt.c ./rex run examples/do.rex | cmp - examples/do.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/fptr.rex | cmp - examples/fptr.out
 	./rex build examples/rexcomp.rex -o /tmp/rexcomp
+	cp examples/stage.rex in.rex
 	/tmp/rexcomp > /tmp/stage.s
 	./rex elf /tmp/stage.s -o /tmp/stage
 	/tmp/stage | cmp - examples/stage.out
+	cp examples/stage2.rex in.rex
+	/tmp/rexcomp > /tmp/stage2.s
+	./rex elf /tmp/stage2.s -o /tmp/stage2
+	/tmp/stage2 | cmp - examples/stage2.out
+	cp examples/stage3.rex in.rex
+	/tmp/rexcomp > /tmp/stage3.s
+	./rex elf /tmp/stage3.s -o /tmp/stage3
+	/tmp/stage3 | cmp - examples/stage3.out
+	cp examples/stage4.rex in.rex
+	/tmp/rexcomp > /tmp/stage4.s
+	./rex elf /tmp/stage4.s -o /tmp/stage4
+	/tmp/stage4 | cmp - examples/stage4.out
+	cp examples/stage5.rex in.rex
+	/tmp/rexcomp > /tmp/stage5.s
+	./rex elf /tmp/stage5.s -o /tmp/stage5
+	/tmp/stage5 | cmp - examples/stage5.out
+	cp examples/stage6.rex in.rex
+	/tmp/rexcomp > /tmp/stage6.s
+	./rex elf /tmp/stage6.s -o /tmp/stage6
+	/tmp/stage6 | cmp - examples/stage6.out
+	cp examples/stage7.rex in.rex
+	/tmp/rexcomp > /tmp/stage7.s
+	./rex elf /tmp/stage7.s -o /tmp/stage7
+	/tmp/stage7 | cmp - examples/stage7.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/logic.rex | cmp - examples/logic.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/array.rex | cmp - examples/array.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/for.rex | cmp - examples/for.out
