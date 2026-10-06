@@ -16,17 +16,17 @@
  * No LLVM. The empire does not rent its code generator.
  */
 
-#define REX_VERSION "0.6.0"
+#define REX_VERSION "0.7.0"
 
 #ifndef REX_PREFIX
 #define REX_PREFIX "/usr/local"
 #endif
 
 typedef enum {
-    T_EOF = 0, T_FN, T_LET, T_IF, T_ELSE, T_WHILE, T_FOR, T_BREAK, T_PRINT, T_EXEC,
+    T_EOF = 0, T_FN, T_LET, T_IF, T_ELSE, T_WHILE, T_FOR, T_BREAK, T_CONTINUE, T_PRINT, T_EXEC,
     T_RETURN, T_READ, T_STRUCT, T_IDENT, T_NUM, T_STR,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_LBRACK, T_RBRACK, T_SEMI, T_COMMA, T_EQ,
-    T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT, T_AMP, T_DOT,
+    T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT, T_AMP, T_DOT, T_ARROW,
     T_EQEQ, T_NE, T_LT, T_GT, T_LE, T_GE,
     T_ANDAND, T_OROR, T_BANG
 } TokKind;
@@ -42,7 +42,7 @@ typedef struct {
 typedef enum {
     N_PROGRAM, N_FN, N_BLOCK, N_LET, N_ASSIGN, N_PRINT, N_EXEC,
     N_RETURN, N_IF, N_WHILE, N_FOR, N_BREAK, N_EXPRSTMT, N_BIN, N_UNARY, N_NUM,
-    N_STR, N_VAR, N_CALL, N_READ, N_INDEX, N_ADDR, N_FIELD, N_STORE
+    N_STR, N_VAR, N_CALL, N_READ, N_INDEX, N_ADDR, N_FIELD, N_STORE, N_CONTINUE
 } NodeKind;
 
 typedef struct Node Node;
@@ -91,6 +91,7 @@ static int g_lbl;
 static int g_depth;
 static FnCtx *g_fn;
 static int g_break = -1;
+static int g_cont = -1;
 static char **g_fns;
 static int *g_arity;
 static int g_nfn;
@@ -228,6 +229,7 @@ static void lex_next(Lexer *L) {
         else if (startswith_kw(t.text, "while", n)) t.kind = T_WHILE;
         else if (startswith_kw(t.text, "for", n)) t.kind = T_FOR;
         else if (startswith_kw(t.text, "break", n)) t.kind = T_BREAK;
+        else if (startswith_kw(t.text, "continue", n)) t.kind = T_CONTINUE;
         else if (startswith_kw(t.text, "print", n)) t.kind = T_PRINT;
         else if (startswith_kw(t.text, "exec", n)) t.kind = T_EXEC;
         else if (startswith_kw(t.text, "return", n)) t.kind = T_RETURN;
@@ -302,6 +304,7 @@ static void lex_next(Lexer *L) {
         if (s[i] == '=' && s[i + 1] == '=') { t.kind = T_EQEQ; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
         if (s[i] == '&' && s[i + 1] == '&') { t.kind = T_ANDAND; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
         if (s[i] == '|' && s[i + 1] == '|') { t.kind = T_OROR; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
+        if (s[i] == '-' && s[i + 1] == '>') { t.kind = T_ARROW; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
         if (s[i] == '!' && s[i + 1] == '=') { t.kind = T_NE; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
         if (s[i] == '<' && s[i + 1] == '=') { t.kind = T_LE; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
         if (s[i] == '>' && s[i + 1] == '=') { t.kind = T_GE; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
@@ -418,13 +421,15 @@ static Node *parse_primary(Lexer *L);
 
 static Node *parse_postfix(Lexer *L) {
     Node *n = parse_primary(L);
-    while (L->tok.kind == T_DOT) {
+    while (L->tok.kind == T_DOT || L->tok.kind == T_ARROW) {
+        int arrow = L->tok.kind == T_ARROW;
         int line = L->tok.line;
         lex_next(L);
         if (L->tok.kind != T_IDENT) die("line %d: expected field name", L->tok.line);
         Node *f = node_new(N_FIELD, line);
         f->a = n;
         f->name = xstrdup(L->tok.text);
+        f->num = arrow;
         lex_next(L);
         n = f;
     }
@@ -651,17 +656,24 @@ static Node *parse_stmt(Lexer *L) {
         expect(L, T_SEMI, "';'");
         return node_new(N_BREAK, t.line);
     }
+    if (t.kind == T_CONTINUE) {
+        lex_next(L);
+        expect(L, T_SEMI, "';'");
+        return node_new(N_CONTINUE, t.line);
+    }
     if (t.kind == T_LBRACE) return parse_block(L);
     if (t.kind == T_IDENT) {
         char *name = xstrdup(t.text);
         int line = t.line;
         lex_next(L);
-        if (L->tok.kind == T_DOT) {
+        if (L->tok.kind == T_DOT || L->tok.kind == T_ARROW) {
+            int arrow = L->tok.kind == T_ARROW;
             lex_next(L);
             if (L->tok.kind != T_IDENT) die("line %d: expected field name", L->tok.line);
             Node *n = node_new(N_ASSIGN, line);
             n->name = name;
             n->str = xstrdup(L->tok.text);
+            n->num = arrow;
             lex_next(L);
             expect(L, T_EQ, "'='");
             n->a = parse_expr(L);
@@ -735,11 +747,38 @@ static void parse_struct(Lexer *L) {
     g_nsd++;
 }
 
+typedef struct { char *name; long init; } Glob;
+static Glob g_globs[32];
+static int g_nglobs;
+
+static int glob_find(const char *name) {
+    for (int i = 0; i < g_nglobs; i++) if (!strcmp(g_globs[i].name, name)) return i;
+    return -1;
+}
+
+static void parse_global(Lexer *L) {
+    expect(L, T_LET, "'let'");
+    if (L->tok.kind != T_IDENT) die("line %d: expected global name", L->tok.line);
+    if (g_nglobs >= 32) die("too many globals");
+    g_globs[g_nglobs].name = xstrdup(L->tok.text);
+    lex_next(L);
+    expect(L, T_EQ, "'='");
+    if (L->tok.kind != T_NUM) die("line %d: global must be an integer constant", L->tok.line);
+    g_globs[g_nglobs].init = L->tok.num;
+    g_nglobs++;
+    lex_next(L);
+    expect(L, T_SEMI, "';'");
+}
+
 static Node *parse_program(Lexer *L) {
     Node *p = node_new(N_PROGRAM, 1);
     while (L->tok.kind != T_EOF) {
         if (L->tok.kind == T_STRUCT) {
             parse_struct(L);
+            continue;
+        }
+        if (L->tok.kind == T_LET) {
+            parse_global(L);
             continue;
         }
         int line = L->tok.line;
@@ -835,7 +874,11 @@ static void scan_locals(FnCtx *fn, Node *n) {
         } else {
             int slot = local_add(fn, n->name, n->line);
             if (n->a && n->a->kind == N_STR) fn->locals[slot].len = -1;
-            else if (n->a && n->a->kind == N_ADDR) fn->locals[slot].len = -2;
+            else if (n->a && n->a->kind == N_ADDR) {
+                fn->locals[slot].len = -2;
+                int j = local_find(fn, n->a->name);
+                if (j >= 0 && fn->locals[j].len == -3) fn->locals[slot].aux = fn->locals[j].aux;
+            }
             else if (n->a && n->a->kind == N_CALL && n->a->name && !strcmp(n->a->name, "alloc"))
                 fn->locals[slot].len = -2;
             else if (n->a && n->a->kind == N_VAR) {
@@ -910,6 +953,8 @@ static void gen_expr(Node *n);
 
 static int expr_is_ptr(Node *n) {
     if (!n) return 0;
+    if (n->kind == N_BIN && (n->op == T_PLUS || n->op == T_MINUS))
+        return expr_is_ptr(n->a) || expr_is_ptr(n->b);
     if (n->kind == N_ADDR) return 1;
     if (n->kind == N_CALL && n->name && !strcmp(n->name, "alloc")) return 1;
     if (n->kind == N_VAR) {
@@ -951,8 +996,14 @@ static void gen_expr(Node *n) {
             emit("    mov $%ld, %%rax", n->num);
             return;
         case N_VAR: {
-            require_declared(g_fn, n->name, n->line);
             int i = local_find(g_fn, n->name);
+            if (i < 0) {
+                int g = glob_find(n->name);
+                if (g < 0) die("line %d: unknown name '%s'", n->line, n->name);
+                emit("    mov rex_g_%s(%%rip), %%rax", n->name);
+                return;
+            }
+            require_declared(g_fn, n->name, n->line);
             if (g_fn->locals[i].len > 0)
                 die("line %d: array '%s' is not an integer", n->line, n->name);
             if (g_fn->locals[i].len == -3)
@@ -969,9 +1020,19 @@ static void gen_expr(Node *n) {
             return;
         }
         case N_FIELD: {
-            if (!n->a || n->a->kind != N_VAR) die("line %d: field wants a struct name", n->line);
+            if (!n->a || n->a->kind != N_VAR) die("line %d: field wants a name", n->line);
             require_declared(g_fn, n->a->name, n->line);
             int i = local_find(g_fn, n->a->name);
+            if (n->num) {
+                if (g_fn->locals[i].len != -2 || g_fn->locals[i].aux < 0)
+                    die("line %d: '%s' is not a struct pointer", n->line, n->a->name);
+                int fi = field_find(g_fn->locals[i].aux, n->name);
+                if (fi < 0) die("line %d: no field '%s'", n->line, n->name);
+                emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                if (fi == 0) emit("    mov (%%rax), %%rax");
+                else emit("    mov -%d(%%rax), %%rax", fi * 8);
+                return;
+            }
             if (g_fn->locals[i].len != -3) die("line %d: '%s' is not a struct", n->line, n->a->name);
             int fi = field_find(g_fn->locals[i].aux, n->name);
             if (fi < 0) die("line %d: no field '%s'", n->line, n->name);
@@ -1138,6 +1199,23 @@ static void gen_expr(Node *n) {
             gen_expr(n->b);
             emit("    mov %%rax, %%rcx");
             emit_pop("%rax");
+            if ((n->op == T_PLUS || n->op == T_MINUS) && (expr_is_ptr(n->a) || expr_is_ptr(n->b) || expr_is_str(n->a) || expr_is_str(n->b))) {
+                int scale = (expr_is_str(n->a) || expr_is_str(n->b)) && !(expr_is_ptr(n->a) || expr_is_ptr(n->b)) ? 1 : 8;
+                if (n->op == T_MINUS && (expr_is_ptr(n->a) || expr_is_str(n->a)) && (expr_is_ptr(n->b) || expr_is_str(n->b))) {
+                    emit("    sub %%rcx, %%rax");
+                    if (scale == 8) emit("    sar $3, %%rax");
+                    return;
+                }
+                if (expr_is_ptr(n->b) || expr_is_str(n->b)) {
+                    emit("    mov %%rax, %%rdx");
+                    emit("    mov %%rcx, %%rax");
+                    emit("    mov %%rdx, %%rcx");
+                }
+                if (scale == 8) emit("    imul $8, %%rcx");
+                if (n->op == T_PLUS) emit("    add %%rcx, %%rax");
+                else emit("    sub %%rcx, %%rax");
+                return;
+            }
             switch (n->op) {
                 case T_PLUS: emit("    add %%rcx, %%rax"); break;
                 case T_MINUS: emit("    sub %%rcx, %%rax"); break;
@@ -1240,11 +1318,32 @@ static void gen_stmt(Node *n) {
             return;
         }
         case N_ASSIGN: {
-            require_declared(g_fn, n->name, n->line);
             int i = local_find(g_fn, n->name);
+            if (i < 0) {
+                int g = glob_find(n->name);
+                if (g < 0) die("line %d: unknown name '%s'", n->line, n->name);
+                gen_expr(n->a);
+                emit("    mov %%rax, rex_g_%s(%%rip)", n->name);
+                return;
+            }
+            require_declared(g_fn, n->name, n->line);
             if (n->str) {
+                int fi;
+                if (n->num) {
+                    if (g_fn->locals[i].len != -2 || g_fn->locals[i].aux < 0)
+                        die("line %d: '%s' is not a struct pointer", n->line, n->name);
+                    fi = field_find(g_fn->locals[i].aux, n->str);
+                    if (fi < 0) die("line %d: no field '%s'", n->line, n->str);
+                    gen_expr(n->a);
+                    emit_push("%rax");
+                    emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                    emit_pop("%rcx");
+                    if (fi == 0) emit("    mov %%rcx, (%%rax)");
+                    else emit("    mov %%rcx, -%d(%%rax)", fi * 8);
+                    return;
+                }
                 if (g_fn->locals[i].len != -3) die("line %d: '%s' is not a struct", n->line, n->name);
-                int fi = field_find(g_fn->locals[i].aux, n->str);
+                fi = field_find(g_fn->locals[i].aux, n->str);
                 if (fi < 0) die("line %d: no field '%s'", n->line, n->str);
                 gen_expr(n->a);
                 emit("    mov %%rax, -%d(%%rbp)", g_fn->locals[i].offset + fi * 8);
@@ -1362,8 +1461,10 @@ static void gen_stmt(Node *n) {
         case N_WHILE: {
             int start = newlbl();
             int end = newlbl();
-            int saved = g_break;
+            int savedb = g_break;
+            int savedc = g_cont;
             g_break = end;
+            g_cont = start;
             emit(".L%d:", start);
             gen_expr(n->a);
             emit("    cmp $0, %%rax");
@@ -1371,29 +1472,39 @@ static void gen_stmt(Node *n) {
             gen_stmt(n->b);
             emit("    jmp .L%d", start);
             emit(".L%d:", end);
-            g_break = saved;
+            g_break = savedb;
+            g_cont = savedc;
             return;
         }
         case N_FOR: {
             int start = newlbl();
             int end = newlbl();
-            int saved = g_break;
+            int cont = newlbl();
+            int savedb = g_break;
+            int savedc = g_cont;
             g_break = end;
+            g_cont = cont;
             gen_stmt(n->a);
             emit(".L%d:", start);
             gen_expr(n->b);
             emit("    cmp $0, %%rax");
             emit("    je .L%d", end);
             if (n->nkids) gen_stmt(n->kids[0]);
+            emit(".L%d:", cont);
             gen_stmt(n->c);
             emit("    jmp .L%d", start);
             emit(".L%d:", end);
-            g_break = saved;
+            g_break = savedb;
+            g_cont = savedc;
             return;
         }
         case N_BREAK:
             if (g_break < 0) die("line %d: break outside a loop", n->line);
             emit("    jmp .L%d", g_break);
+            return;
+        case N_CONTINUE:
+            if (g_cont < 0) die("line %d: continue outside a loop", n->line);
+            emit("    jmp .L%d", g_cont);
             return;
         default:
             die("line %d: not a statement", n->line);
@@ -1464,6 +1575,13 @@ static void gen_program(Node *p, FILE *out) {
             fputs("    .asciz ", out);
             asm_escape(out, g_strs[i].s);
             fputc('\n', out);
+        }
+    }
+    if (g_nglobs) {
+        emit("    .data");
+        for (int i = 0; i < g_nglobs; i++) {
+            emit("rex_g_%s:", g_globs[i].name);
+            emit("    .quad %ld", g_globs[i].init);
         }
     }
     emit("    .section .note.GNU-stack,\"\",@progbits");

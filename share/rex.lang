@@ -33,6 +33,7 @@
           <keyword>else</keyword>
           <keyword>while</keyword>
           <keyword>for</keyword>
+          <keyword>continue</keyword>
           <keyword>break</keyword>
           <keyword>print</keyword>
           <keyword>exec</keyword>

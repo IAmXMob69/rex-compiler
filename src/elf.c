@@ -92,7 +92,7 @@ static void mov_imm_reg(long imm, int rd) {
 static void asm_line(char *raw) {
     char *line = trim(raw);
     if (!*line || *line == '#') return;
-    if (!strncmp(line, ".text", 5) || !strncmp(line, ".section", 8) || !strncmp(line, ".globl", 6)) return;
+    if (!strncmp(line, ".text", 5) || !strncmp(line, ".section", 8) || !strncmp(line, ".globl", 6) || !strncmp(line, ".data", 5)) return;
     if (!strncmp(line, ".asciz ", 7)) {
         char *q = strchr(line, '"');
         if (!q) die_elf("bad asciz");
@@ -160,10 +160,24 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "sub %rdi, %rsi")) { emitb(0x48); emitb(0x29); emitb(0xfe); return; }
     if (!strcmp(line, "sub %rcx, %rdx")) { emitb(0x48); emitb(0x29); emitb(0xca); return; }
     if (!strcmp(line, "mov (%rax), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x00); return; }
+    if (!strcmp(line, "sar $3, %rax")) { emitb(0x48); emitb(0xc1); emitb(0xf8); emitb(0x03); return; }
+    if (!strcmp(line, "mov %rdx, %rcx")) { emitb(0x48); emitb(0x89); emitb(0xd1); return; }
+    if (sscanf(line, "mov %ld(%%rax), %%rax", &imm) == 1 && imm >= 0 && imm < 128) { emitb(0x48); emitb(0x8b); emitb(0x40); emitb((unsigned)imm); return; }
+    if (sscanf(line, "mov %%rcx, %ld(%%rax)", &imm) == 1 && imm >= 0 && imm < 128) { emitb(0x48); emitb(0x89); emitb(0x48); emitb((unsigned)imm); return; }
+    if (sscanf(line, ".quad %li", &imm) == 1) { emit64((uint64_t)imm); return; }
+    if (sscanf(line, "mov %95[^()](%%rip), %%rax", name) == 1 && strstr(line, "(%rip), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x05); rel32(name); return; }
+    if (sscanf(line, "mov %%rax, %95[^()](%%rip)", name) == 1 && strstr(line, "(%rip)")) { emitb(0x48); emitb(0x89); emitb(0x05); rel32(name); return; }
     if (!strcmp(line, "mov %rcx, (%rax)")) { emitb(0x48); emitb(0x89); emitb(0x08); return; }
     if (!strcmp(line, "mov %rdi, (%rax)")) { emitb(0x48); emitb(0x89); emitb(0x38); return; }
     if (!strcmp(line, "mov -8(%rax), %rdx")) { emitb(0x48); emitb(0x8b); emitb(0x50); emitb(0xf8); return; }
     if (!strcmp(line, "mov -8(%rax), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x40); emitb(0xf8); return; }
+    if (!strcmp(line, "mov -16(%rax), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x40); emitb(0xf0); return; }
+    if (!strcmp(line, "mov -24(%rax), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x40); emitb(0xe8); return; }
+    if (!strcmp(line, "mov -32(%rax), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x40); emitb(0xe0); return; }
+    if (!strcmp(line, "mov %rcx, -8(%rax)")) { emitb(0x48); emitb(0x89); emitb(0x48); emitb(0xf8); return; }
+    if (!strcmp(line, "mov %rcx, -16(%rax)")) { emitb(0x48); emitb(0x89); emitb(0x48); emitb(0xf0); return; }
+    if (!strcmp(line, "mov %rcx, -24(%rax)")) { emitb(0x48); emitb(0x89); emitb(0x48); emitb(0xe8); return; }
+    if (!strcmp(line, "mov %rcx, -32(%rax)")) { emitb(0x48); emitb(0x89); emitb(0x48); emitb(0xe0); return; }
     if (!strcmp(line, "mov (%rax,%rcx,8), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x04); emitb(0xc8); return; }
     if (!strcmp(line, "mov %rdx, (%rax,%rcx,8)")) { emitb(0x48); emitb(0x89); emitb(0x14); emitb(0xc8); return; }
     if (!strcmp(line, "movzbl (%rax,%rcx), %eax")) { emitb(0x0f); emitb(0xb6); emitb(0x04); emitb(0x08); return; }
@@ -359,7 +373,7 @@ int rex_write_elf(const char *asm_text, const char *outpath) {
     memcpy(eh + 32, &phoff, 8);
     eh[52] = 64; eh[54] = 56; eh[56] = 1;
     unsigned char ph[56] = {0};
-    ph[0] = 1; ph[4] = 5;
+    ph[0] = 1; ph[4] = 7;
     uint64_t off = 0, va = base, filesz = 64 + 56 + (uint64_t)clen;
     memcpy(ph + 8, &off, 8);
     memcpy(ph + 16, &va, 8);
