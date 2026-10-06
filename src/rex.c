@@ -16,7 +16,7 @@
  * No LLVM. The empire does not rent its code generator.
  */
 
-#define REX_VERSION "0.12.0"
+#define REX_VERSION "0.13.0"
 
 #ifndef REX_PREFIX
 #define REX_PREFIX "/usr/local"
@@ -1168,6 +1168,8 @@ static void scan_locals(FnCtx *fn, Node *n) {
             }
             else if (n->a && n->a->kind == N_CALL && n->a->name && !strcmp(n->a->name, "alloc"))
                 fn->locals[slot].len = -2;
+            else if (n->a && n->a->kind == N_CALL && n->a->name && !strcmp(n->a->name, "load"))
+                fn->locals[slot].len = -1;
             else if (n->a && n->a->kind == N_VAR) {
                 int sid = struct_find(n->a->name);
                 if (sid >= 0) {
@@ -1256,6 +1258,7 @@ static int expr_is_ptr(Node *n) {
 static int expr_is_str(Node *n) {
     if (!n) return 0;
     if (n->kind == N_STR) return 1;
+    if (n->kind == N_CALL && n->name && !strcmp(n->name, "load")) return 1;
     if (n->kind == N_VAR) {
         int i = local_find(g_fn, n->name);
         if (i >= 0 && g_fn->locals[i].len == -1) return 1;
@@ -1339,7 +1342,7 @@ static void gen_expr(Node *n) {
             int ok = newlbl();
             int id = str_id++;
             remember_str(id, "index out of range");
-            if (g_fn->locals[i].len == -1) {
+            if (g_fn->locals[i].len == -1 || g_fn->locals[i].len == 0) {
                 gen_expr(n->a);
                 emit_push("%rax");
                 emit("    mov -%d(%%rbp), %%rdi", g_fn->locals[i].offset);
@@ -1417,6 +1420,27 @@ static void gen_expr(Node *n) {
                     return;
                 }
                 die("line %d: len() wants an array, string, or heap block", n->line);
+            }
+            if (strcmp(n->name, "putn") == 0) {
+                if (n->nkids != 1) die("line %d: putn() wants a number", n->line);
+                gen_expr(n->kids[0]);
+                emit("    mov %%rax, %%rdi");
+                emit_call("rex_put_int");
+                return;
+            }
+            if (strcmp(n->name, "put") == 0) {
+                if (n->nkids != 1 || !expr_is_str(n->kids[0])) die("line %d: put() wants a string", n->line);
+                gen_expr(n->kids[0]);
+                emit("    mov %%rax, %%rdi");
+                emit_call("rex_put_str");
+                return;
+            }
+            if (strcmp(n->name, "load") == 0) {
+                if (n->nkids != 1 || !expr_is_str(n->kids[0])) die("line %d: load() wants a path", n->line);
+                gen_expr(n->kids[0]);
+                emit("    mov %%rax, %%rdi");
+                emit_call("rex_load");
+                return;
             }
             if (strcmp(n->name, "alloc") == 0) {
                 if (n->nkids != 1) die("line %d: alloc() wants one count", n->line);
@@ -2039,6 +2063,7 @@ static void usage(void) {
         "  rex run <file.rex>           compile and execute\n"
         "  rex build <file.rex> -o bin  emit a binary\n"
         "  rex asm <file.rex>           write assembly to stdout\n"
+        "  rex elf <file.s> -o bin    assemble emitted assembly\n"
         "  rex version\n",
         REX_VERSION);
     exit(2);
@@ -2125,6 +2150,16 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "asm") == 0) {
         if (argc < 3) usage();
         return compile_to(argv[2], NULL);
+    }
+    if (strcmp(argv[1], "elf") == 0) {
+        if (argc < 3) usage();
+        const char *out = "a.out";
+        if (argc >= 5 && strcmp(argv[3], "-o") == 0) out = argv[4];
+        int len = 0;
+        char *src = read_file(argv[2], &len);
+        if (rex_write_elf(src, out) != 0) die("elf emission failed");
+        free(src);
+        return 0;
     }
     if (strcmp(argv[1], "build") == 0) {
         if (argc < 3) usage();

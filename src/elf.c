@@ -150,6 +150,8 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "mov %rbp, %rsp")) { emitb(0x48); emitb(0x89); emitb(0xec); return; }
     if (!strcmp(line, "mov %rsp, %rsi")) { emitb(0x48); emitb(0x89); emitb(0xe6); return; }
     if (!strcmp(line, "mov %rax, %rcx")) { emitb(0x48); emitb(0x89); emitb(0xc1); return; }
+    if (!strcmp(line, "mov %rax, (%rcx)")) { emitb(0x48); emitb(0x89); emitb(0x01); return; }
+    if (!strcmp(line, "movb $0, (%rcx,%rax)")) { emitb(0xc6); emitb(0x04); emitb(0x01); emitb(0x00); return; }
     if (!strcmp(line, "mov %rcx, %rax")) { emitb(0x48); emitb(0x89); emitb(0xc8); return; }
     if (!strcmp(line, "mov %rax, %rdi")) { emitb(0x48); emitb(0x89); emitb(0xc7); return; }
     if (!strcmp(line, "mov %rdi, %rax")) { emitb(0x48); emitb(0x89); emitb(0xf8); return; }
@@ -199,6 +201,7 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "cmp %ecx, %edx")) { emitb(0x39); emitb(0xca); return; }
     if (!strcmp(line, "test %edx, %edx")) { emitb(0x85); emitb(0xd2); return; }
     if (!strcmp(line, "add $8, %rax")) { emitb(0x48); emitb(0x83); emitb(0xc0); emitb(0x08); return; }
+    if (!strcmp(line, "add $8, %rcx")) { emitb(0x48); emitb(0x83); emitb(0xc1); emitb(0x08); return; }
     if (!strcmp(line, "inc %rdi")) { emitb(0x48); emitb(0xff); emitb(0xc7); return; }
     if (!strcmp(line, "imul $8, %rcx")) { emitb(0x48); emitb(0x6b); emitb(0xc9); emitb(0x08); return; }
     if (!strcmp(line, "sub %rdi, %rax")) { emitb(0x48); emitb(0x29); emitb(0xf8); return; }
@@ -317,6 +320,15 @@ static const char *runtime =
     "rex_ps_go:\nsub %rdi, %rsi\nmov %rsi, %rdx\nmov %rdi, %rsi\nmov $1, %rax\nmov $1, %rdi\nsyscall\n"
     "mov $1, %rax\nmov $1, %rdi\nlea rex_nl(%rip), %rsi\nmov $1, %rdx\nsyscall\n"
     "pop %rbp\nret\n"
+    "rex_put_str:\npush %rbp\nmov %rsp, %rbp\nmov %rdi, %rsi\n"
+    "rex_put_len:\ncmpb $0, (%rsi)\nje rex_put_go\ninc %rsi\njmp rex_put_len\n"
+    "rex_put_go:\nsub %rdi, %rsi\nmov %rsi, %rdx\nmov %rdi, %rsi\nmov $1, %rax\nmov $1, %rdi\nsyscall\npop %rbp\nret\n"
+    "rex_put_int:\npush %rbp\nmov %rsp, %rbp\nsub $32, %rsp\nmov %rdi, %rax\n"
+    "rex_puti_pos:\nlea -1(%rbp), %rcx\nmovb $10, (%rcx)\n"
+    "test %rax, %rax\njnz rex_puti_loop\ndec %rcx\nmovb $48, (%rcx)\njmp rex_puti_out\n"
+    "rex_puti_loop:\ndec %rcx\nxor %edx, %edx\nmov $10, %r9\nidiv %r9\nadd $48, %dl\nmov %dl, (%rcx)\ntest %rax, %rax\njnz rex_puti_loop\n"
+    "rex_puti_out:\nlea -1(%rbp), %rdx\nsub %rcx, %rdx\nmov %rcx, %rsi\nmov $1, %rax\nmov $1, %rdi\nsyscall\n"
+    "mov %rbp, %rsp\npop %rbp\nret\n"
     "rex_print_int:\n"
     "push %rbp\nmov %rsp, %rbp\nsub $32, %rsp\nmov %rdi, %rax\n"
     "mov $0x8000000000000000, %rdx\ncmp %rdx, %rax\nje rex_pi_min\n"
@@ -352,6 +364,7 @@ static const char *runtime =
     "rex_minus:\n.asciz \"-\"\n"
     "rex_strlen:\nmov %rdi, %rax\nrex_sl:\ncmpb $0, (%rax)\nje rex_sl_done\ninc %rax\njmp rex_sl\nrex_sl_done:\nsub %rdi, %rax\nret\n"
     "rex_strcmp:\nmov %rdi, %rax\nrex_sc:\nmovzbl (%rax), %edx\nmovzbl (%rsi), %ecx\ncmp %ecx, %edx\njne rex_sc_ne\ntest %edx, %edx\nje rex_sc_eq\ninc %rax\ninc %rsi\njmp rex_sc\nrex_sc_eq:\nxor %eax, %eax\nret\nrex_sc_ne:\nmov $1, %rax\nret\n"
+    "rex_load:\npush %rbp\nmov %rsp, %rbp\nmov $2, %rax\nxor %esi, %esi\nxor %edx, %edx\nsyscall\npush %rax\nmov $65536, %rsi\nxor %edi, %edi\nmov $3, %rdx\nmov $34, %r10\nmov $-1, %r8\nxor %r9d, %r9d\nmov $9, %rax\nsyscall\npop %rdi\npush %rax\nmov %rax, %rsi\nmov $65000, %rdx\nxor %eax, %eax\nsyscall\npop %rcx\nmovb $0, (%rcx,%rax)\nmov %rcx, %rax\nmov %rbp, %rsp\npop %rbp\nret\n"
     "rex_alloc:\npush %rbp\nmov %rsp, %rbp\npush %rdi\nmov $4096, %rsi\nxor %edi, %edi\nmov $3, %rdx\nmov $34, %r10\nmov $-1, %r8\nxor %r9d, %r9d\nmov $9, %rax\nsyscall\npop %rdi\nmov %rdi, (%rax)\nadd $8, %rax\nmov %rbp, %rsp\npop %rbp\nret\n"
     "rex_free:\nsub $8, %rdi\nmov $4096, %rsi\nmov $11, %rax\nsyscall\nret\n"
     "rex_min:\n.asciz \"-9223372036854775808\"\n"

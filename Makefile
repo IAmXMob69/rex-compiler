@@ -61,6 +61,10 @@ test: rex
 	REX_RUNTIME=src/rexrt.c ./rex run examples/more.rex | cmp - examples/more.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/do.rex | cmp - examples/do.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/fptr.rex | cmp - examples/fptr.out
+	./rex build examples/rexcomp.rex -o /tmp/rexcomp
+	/tmp/rexcomp > /tmp/stage.s
+	./rex elf /tmp/stage.s -o /tmp/stage
+	/tmp/stage | cmp - examples/stage.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/logic.rex | cmp - examples/logic.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/array.rex | cmp - examples/array.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/for.rex | cmp - examples/for.out
