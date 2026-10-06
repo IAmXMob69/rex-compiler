@@ -37,6 +37,7 @@
           <keyword>print</keyword>
           <keyword>exec</keyword>
           <keyword>return</keyword>
+          <keyword>struct</keyword>
           <keyword>read</keyword>
         </context>
       </include>

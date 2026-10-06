@@ -16,7 +16,7 @@
  * No LLVM. The empire does not rent its code generator.
  */
 
-#define REX_VERSION "0.5.1"
+#define REX_VERSION "0.6.0"
 
 #ifndef REX_PREFIX
 #define REX_PREFIX "/usr/local"
@@ -24,9 +24,9 @@
 
 typedef enum {
     T_EOF = 0, T_FN, T_LET, T_IF, T_ELSE, T_WHILE, T_FOR, T_BREAK, T_PRINT, T_EXEC,
-    T_RETURN, T_READ, T_IDENT, T_NUM, T_STR,
+    T_RETURN, T_READ, T_STRUCT, T_IDENT, T_NUM, T_STR,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_LBRACK, T_RBRACK, T_SEMI, T_COMMA, T_EQ,
-    T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT,
+    T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT, T_AMP, T_DOT,
     T_EQEQ, T_NE, T_LT, T_GT, T_LE, T_GE,
     T_ANDAND, T_OROR, T_BANG
 } TokKind;
@@ -42,7 +42,7 @@ typedef struct {
 typedef enum {
     N_PROGRAM, N_FN, N_BLOCK, N_LET, N_ASSIGN, N_PRINT, N_EXEC,
     N_RETURN, N_IF, N_WHILE, N_FOR, N_BREAK, N_EXPRSTMT, N_BIN, N_UNARY, N_NUM,
-    N_STR, N_VAR, N_CALL, N_READ, N_INDEX
+    N_STR, N_VAR, N_CALL, N_READ, N_INDEX, N_ADDR, N_FIELD, N_STORE
 } NodeKind;
 
 typedef struct Node Node;
@@ -72,7 +72,8 @@ typedef struct {
 typedef struct {
     char *name;
     int offset; /* first slot, negative rbp offset */
-    int len;    /* 0 = integer, >0 = array of that many integers */
+    int len;    /* 0 int, >0 array, -1 string, -2 pointer, -3 struct */
+    int aux;    /* struct id when len == -3 */
     int declared;
 } Local;
 
@@ -95,6 +96,19 @@ static int *g_arity;
 static int g_nfn;
 static int g_err;
 static char g_tmpasm[64];
+
+typedef struct { char *name; char *fields[8]; int nfields; } SDef;
+static SDef g_sd[16];
+static int g_nsd;
+
+static int struct_find(const char *name) {
+    for (int i = 0; i < g_nsd; i++) if (!strcmp(g_sd[i].name, name)) return i;
+    return -1;
+}
+static int field_find(int id, const char *f) {
+    for (int i = 0; i < g_sd[id].nfields; i++) if (!strcmp(g_sd[id].fields[i], f)) return i;
+    return -1;
+}
 
 static void cleanup_tmp(void) {
     if (g_tmpasm[0]) {
@@ -218,6 +232,7 @@ static void lex_next(Lexer *L) {
         else if (startswith_kw(t.text, "exec", n)) t.kind = T_EXEC;
         else if (startswith_kw(t.text, "return", n)) t.kind = T_RETURN;
         else if (startswith_kw(t.text, "read", n)) t.kind = T_READ;
+        else if (startswith_kw(t.text, "struct", n)) t.kind = T_STRUCT;
         else t.kind = T_IDENT;
         L->col += n;
         L->pos = i;
@@ -293,6 +308,8 @@ static void lex_next(Lexer *L) {
     }
     TokKind k = T_EOF;
     switch (c) {
+        case '&': k = T_AMP; break;
+        case '.': k = T_DOT; break;
         case '(': k = T_LPAREN; break;
         case ')': k = T_RPAREN; break;
         case '{': k = T_LBRACE; break;
@@ -397,7 +414,41 @@ static Node *parse_primary(Lexer *L) {
     return NULL;
 }
 
+static Node *parse_primary(Lexer *L);
+
+static Node *parse_postfix(Lexer *L) {
+    Node *n = parse_primary(L);
+    while (L->tok.kind == T_DOT) {
+        int line = L->tok.line;
+        lex_next(L);
+        if (L->tok.kind != T_IDENT) die("line %d: expected field name", L->tok.line);
+        Node *f = node_new(N_FIELD, line);
+        f->a = n;
+        f->name = xstrdup(L->tok.text);
+        lex_next(L);
+        n = f;
+    }
+    return n;
+}
+
 static Node *parse_unary(Lexer *L) {
+    if (L->tok.kind == T_AMP) {
+        int line = L->tok.line;
+        lex_next(L);
+        if (L->tok.kind != T_IDENT) die("line %d: & wants a name", line);
+        Node *n = node_new(N_ADDR, line);
+        n->name = xstrdup(L->tok.text);
+        lex_next(L);
+        return n;
+    }
+    if (L->tok.kind == T_STAR) {
+        int line = L->tok.line;
+        lex_next(L);
+        Node *n = node_new(N_UNARY, line);
+        n->op = T_STAR;
+        n->a = parse_unary(L);
+        return n;
+    }
     if (L->tok.kind == T_MINUS || L->tok.kind == T_BANG) {
         int op = L->tok.kind;
         int line = L->tok.line;
@@ -407,7 +458,7 @@ static Node *parse_unary(Lexer *L) {
         n->a = parse_unary(L);
         return n;
     }
-    return parse_primary(L);
+    return parse_postfix(L);
 }
 
 static Node *parse_factor(Lexer *L) {
@@ -586,6 +637,15 @@ static Node *parse_stmt(Lexer *L) {
         node_add(n, parse_block(L));
         return n;
     }
+    if (t.kind == T_STAR) {
+        Node *dest = parse_unary(L);
+        expect(L, T_EQ, "'='");
+        Node *n = node_new(N_STORE, t.line);
+        n->a = dest;
+        n->b = parse_expr(L);
+        expect(L, T_SEMI, "';'");
+        return n;
+    }
     if (t.kind == T_BREAK) {
         lex_next(L);
         expect(L, T_SEMI, "';'");
@@ -596,6 +656,18 @@ static Node *parse_stmt(Lexer *L) {
         char *name = xstrdup(t.text);
         int line = t.line;
         lex_next(L);
+        if (L->tok.kind == T_DOT) {
+            lex_next(L);
+            if (L->tok.kind != T_IDENT) die("line %d: expected field name", L->tok.line);
+            Node *n = node_new(N_ASSIGN, line);
+            n->name = name;
+            n->str = xstrdup(L->tok.text);
+            lex_next(L);
+            expect(L, T_EQ, "'='");
+            n->a = parse_expr(L);
+            expect(L, T_SEMI, "';'");
+            return n;
+        }
         if (L->tok.kind == T_LBRACK) {
             lex_next(L);
             Node *n = node_new(N_ASSIGN, line);
@@ -643,9 +715,33 @@ static Node *parse_block(Lexer *L) {
     return n;
 }
 
+static void parse_struct(Lexer *L) {
+    expect(L, T_STRUCT, "'struct'");
+    if (L->tok.kind != T_IDENT) die("line %d: expected struct name", L->tok.line);
+    if (g_nsd >= 16) die("too many structs");
+    SDef *s = &g_sd[g_nsd];
+    memset(s, 0, sizeof(*s));
+    s->name = xstrdup(L->tok.text);
+    lex_next(L);
+    expect(L, T_LBRACE, "'{'");
+    while (L->tok.kind == T_IDENT) {
+        if (s->nfields >= 8) die("line %d: at most 8 fields", L->tok.line);
+        s->fields[s->nfields++] = xstrdup(L->tok.text);
+        lex_next(L);
+        expect(L, T_SEMI, "';'");
+    }
+    if (s->nfields < 1) die("struct %s has no fields", s->name);
+    expect(L, T_RBRACE, "'}'");
+    g_nsd++;
+}
+
 static Node *parse_program(Lexer *L) {
     Node *p = node_new(N_PROGRAM, 1);
     while (L->tok.kind != T_EOF) {
+        if (L->tok.kind == T_STRUCT) {
+            parse_struct(L);
+            continue;
+        }
         int line = L->tok.line;
         expect(L, T_FN, "'fn'");
         if (L->tok.kind != T_IDENT) die("expected function name");
@@ -739,9 +835,22 @@ static void scan_locals(FnCtx *fn, Node *n) {
         } else {
             int slot = local_add(fn, n->name, n->line);
             if (n->a && n->a->kind == N_STR) fn->locals[slot].len = -1;
+            else if (n->a && n->a->kind == N_ADDR) fn->locals[slot].len = -2;
+            else if (n->a && n->a->kind == N_CALL && n->a->name && !strcmp(n->a->name, "alloc"))
+                fn->locals[slot].len = -2;
             else if (n->a && n->a->kind == N_VAR) {
-                int j = local_find(fn, n->a->name);
-                if (j >= 0 && fn->locals[j].len < 0) fn->locals[slot].len = -1;
+                int sid = struct_find(n->a->name);
+                if (sid >= 0) {
+                    /* replace the one-slot local with a struct */
+                    fn->nlocals--;
+                    fn->slots--;
+                    int slot2 = local_add_slots(fn, n->name, n->line, g_sd[sid].nfields, 0);
+                    fn->locals[slot2].len = -3;
+                    fn->locals[slot2].aux = sid;
+                } else {
+                    int j = local_find(fn, n->a->name);
+                    if (j >= 0) fn->locals[slot].len = fn->locals[j].len < 0 ? fn->locals[j].len : 0;
+                }
             }
         }
     }
@@ -799,12 +908,23 @@ static void remember_str(int id, const char *s);
 
 static void gen_expr(Node *n);
 
+static int expr_is_ptr(Node *n) {
+    if (!n) return 0;
+    if (n->kind == N_ADDR) return 1;
+    if (n->kind == N_CALL && n->name && !strcmp(n->name, "alloc")) return 1;
+    if (n->kind == N_VAR) {
+        int i = local_find(g_fn, n->name);
+        if (i >= 0 && g_fn->locals[i].len == -2) return 1;
+    }
+    return 0;
+}
+
 static int expr_is_str(Node *n) {
     if (!n) return 0;
     if (n->kind == N_STR) return 1;
     if (n->kind == N_VAR) {
         int i = local_find(g_fn, n->name);
-        if (i >= 0 && g_fn->locals[i].len < 0) return 1;
+        if (i >= 0 && g_fn->locals[i].len == -1) return 1;
     }
     return 0;
 }
@@ -835,19 +955,77 @@ static void gen_expr(Node *n) {
             int i = local_find(g_fn, n->name);
             if (g_fn->locals[i].len > 0)
                 die("line %d: array '%s' is not an integer", n->line, n->name);
+            if (g_fn->locals[i].len == -3)
+                die("line %d: struct '%s' is not an integer", n->line, n->name);
             emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+            return;
+        }
+        case N_ADDR: {
+            require_declared(g_fn, n->name, n->line);
+            int i = local_find(g_fn, n->name);
+            if (g_fn->locals[i].len > 0 || g_fn->locals[i].len == -1)
+                die("line %d: cannot take the address of '%s'", n->line, n->name);
+            emit("    lea -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+            return;
+        }
+        case N_FIELD: {
+            if (!n->a || n->a->kind != N_VAR) die("line %d: field wants a struct name", n->line);
+            require_declared(g_fn, n->a->name, n->line);
+            int i = local_find(g_fn, n->a->name);
+            if (g_fn->locals[i].len != -3) die("line %d: '%s' is not a struct", n->line, n->a->name);
+            int fi = field_find(g_fn->locals[i].aux, n->name);
+            if (fi < 0) die("line %d: no field '%s'", n->line, n->name);
+            emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset + fi * 8);
             return;
         }
         case N_INDEX: {
             require_declared(g_fn, n->name, n->line);
             int i = local_find(g_fn, n->name);
-            if (g_fn->locals[i].len <= 0)
-                die("line %d: '%s' is not an array", n->line, n->name);
-            gen_expr(n->a);
             int bad = newlbl();
             int ok = newlbl();
             int id = str_id++;
             remember_str(id, "index out of range");
+            if (g_fn->locals[i].len == -1) {
+                gen_expr(n->a);
+                emit_push("%rax");
+                emit("    mov -%d(%%rbp), %%rdi", g_fn->locals[i].offset);
+                emit_call("rex_strlen");
+                emit("    mov %%rax, %%rcx");
+                emit_pop("%rax");
+                emit("    cmp $0, %%rax");
+                emit("    jl .L%d", bad);
+                emit("    cmp %%rcx, %%rax");
+                emit("    jl .L%d", ok);
+                emit(".L%d:", bad);
+                emit("    lea .LS%d(%%rip), %%rdi", id);
+                emit_call("rex_fail");
+                emit(".L%d:", ok);
+                emit("    mov %%rax, %%rcx");
+                emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                emit("    movzbl (%%rax,%%rcx), %%eax");
+                return;
+            }
+            if (g_fn->locals[i].len == -2) {
+                gen_expr(n->a);
+                emit_push("%rax");
+                emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                emit("    mov -8(%%rax), %%rdx");
+                emit_pop("%rcx");
+                emit("    cmp $0, %%rcx");
+                emit("    jl .L%d", bad);
+                emit("    cmp %%rdx, %%rcx");
+                emit("    jl .L%d", ok);
+                emit(".L%d:", bad);
+                emit("    lea .LS%d(%%rip), %%rdi", id);
+                emit_call("rex_fail");
+                emit(".L%d:", ok);
+                emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                emit("    mov (%%rax,%%rcx,8), %%rax");
+                return;
+            }
+            if (g_fn->locals[i].len <= 0)
+                die("line %d: '%s' is not an array", n->line, n->name);
+            gen_expr(n->a);
             emit("    cmp $0, %%rax");
             emit("    jl .L%d", bad);
             emit("    cmp $%d, %%rax", g_fn->locals[i].len);
@@ -867,12 +1045,37 @@ static void gen_expr(Node *n) {
         case N_CALL: {
             if (strcmp(n->name, "len") == 0) {
                 if (n->nkids != 1 || n->kids[0]->kind != N_VAR)
-                    die("line %d: len() wants an array name", n->line);
+                    die("line %d: len() wants a name", n->line);
                 require_declared(g_fn, n->kids[0]->name, n->line);
                 int i = local_find(g_fn, n->kids[0]->name);
-                if (g_fn->locals[i].len <= 0)
-                    die("line %d: len() wants an array", n->line);
-                emit("    mov $%d, %%rax", g_fn->locals[i].len);
+                if (g_fn->locals[i].len > 0) {
+                    emit("    mov $%d, %%rax", g_fn->locals[i].len);
+                    return;
+                }
+                if (g_fn->locals[i].len == -1) {
+                    emit("    mov -%d(%%rbp), %%rdi", g_fn->locals[i].offset);
+                    emit_call("rex_strlen");
+                    return;
+                }
+                if (g_fn->locals[i].len == -2) {
+                    emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                    emit("    mov -8(%%rax), %%rax");
+                    return;
+                }
+                die("line %d: len() wants an array, string, or heap block", n->line);
+            }
+            if (strcmp(n->name, "alloc") == 0) {
+                if (n->nkids != 1) die("line %d: alloc() wants one count", n->line);
+                gen_expr(n->kids[0]);
+                emit("    mov %%rax, %%rdi");
+                emit_call("rex_alloc");
+                return;
+            }
+            if (strcmp(n->name, "free") == 0) {
+                if (n->nkids != 1) die("line %d: free() wants one pointer", n->line);
+                gen_expr(n->kids[0]);
+                emit("    mov %%rax, %%rdi");
+                emit_call("rex_free");
                 return;
             }
             int want = fn_arity(n->name);
@@ -894,7 +1097,9 @@ static void gen_expr(Node *n) {
         case N_UNARY:
             if (expr_is_str(n->a)) die("line %d: string is not a number", n->line);
             gen_expr(n->a);
-            if (n->op == T_BANG) {
+            if (n->op == T_STAR) {
+                emit("    mov (%%rax), %%rax");
+            } else if (n->op == T_BANG) {
                 emit("    cmp $0, %%rax");
                 emit("    sete %%al");
                 emit("    movzx %%al, %%eax");
@@ -1017,9 +1222,17 @@ static void gen_stmt(Node *n) {
                 g_fn->locals[i].declared = 1;
                 return;
             }
-            if (g_fn->locals[i].len < 0 && !expr_is_str(n->a))
+            if (g_fn->locals[i].len == -3) {
+                for (int k = 0; k < g_sd[g_fn->locals[i].aux].nfields; k++)
+                    emit("    movq $0, -%d(%%rbp)", g_fn->locals[i].offset + k * 8);
+                g_fn->locals[i].declared = 1;
+                return;
+            }
+            if (g_fn->locals[i].len == -1 && !expr_is_str(n->a))
                 die("line %d: '%s' is a string", n->line, n->name);
-            if (g_fn->locals[i].len == 0 && expr_is_str(n->a))
+            if (g_fn->locals[i].len == -2 && !expr_is_ptr(n->a))
+                die("line %d: '%s' is a pointer", n->line, n->name);
+            if (g_fn->locals[i].len == 0 && (expr_is_str(n->a) || expr_is_ptr(n->a)))
                 die("line %d: '%s' is an integer", n->line, n->name);
             gen_expr(n->a);
             g_fn->locals[i].declared = 1;
@@ -1029,7 +1242,40 @@ static void gen_stmt(Node *n) {
         case N_ASSIGN: {
             require_declared(g_fn, n->name, n->line);
             int i = local_find(g_fn, n->name);
+            if (n->str) {
+                if (g_fn->locals[i].len != -3) die("line %d: '%s' is not a struct", n->line, n->name);
+                int fi = field_find(g_fn->locals[i].aux, n->str);
+                if (fi < 0) die("line %d: no field '%s'", n->line, n->str);
+                gen_expr(n->a);
+                emit("    mov %%rax, -%d(%%rbp)", g_fn->locals[i].offset + fi * 8);
+                return;
+            }
             if (n->b) {
+                if (g_fn->locals[i].len == -2) {
+                    gen_expr(n->b);
+                    emit_push("%rax");
+                    gen_expr(n->a);
+                    emit_push("%rax");
+                    emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                    emit("    mov -8(%%rax), %%rdx");
+                    emit_pop("%rcx");
+                    int bad = newlbl();
+                    int ok = newlbl();
+                    int id = str_id++;
+                    remember_str(id, "index out of range");
+                    emit("    cmp $0, %%rcx");
+                    emit("    jl .L%d", bad);
+                    emit("    cmp %%rdx, %%rcx");
+                    emit("    jl .L%d", ok);
+                    emit(".L%d:", bad);
+                    emit("    lea .LS%d(%%rip), %%rdi", id);
+                    emit_call("rex_fail");
+                    emit(".L%d:", ok);
+                    emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                    emit_pop("%rdx");
+                    emit("    mov %%rdx, (%%rax,%%rcx,8)");
+                    return;
+                }
                 if (g_fn->locals[i].len <= 0)
                     die("line %d: '%s' is not an array", n->line, n->name);
                 gen_expr(n->b);
@@ -1053,16 +1299,27 @@ static void gen_stmt(Node *n) {
                 emit("    mov %%rcx, -%d(%%rbp, %%rax)", g_fn->locals[i].offset);
                 return;
             }
-            if (g_fn->locals[i].len > 0)
-                die("line %d: array '%s' is not an integer", n->line, n->name);
-            if (g_fn->locals[i].len < 0 && !expr_is_str(n->a))
+            if (g_fn->locals[i].len == -3)
+                die("line %d: struct '%s' is not an integer", n->line, n->name);
+            if (g_fn->locals[i].len == -1 && !expr_is_str(n->a))
                 die("line %d: '%s' is a string", n->line, n->name);
-            if (g_fn->locals[i].len == 0 && expr_is_str(n->a))
+            if (g_fn->locals[i].len == -2 && !expr_is_ptr(n->a))
+                die("line %d: '%s' is a pointer", n->line, n->name);
+            if (g_fn->locals[i].len == 0 && (expr_is_str(n->a) || expr_is_ptr(n->a)))
                 die("line %d: '%s' is an integer", n->line, n->name);
             gen_expr(n->a);
             emit("    mov %%rax, -%d(%%rbp)", g_fn->locals[i].offset);
             return;
         }
+        case N_STORE:
+            if (!n->a || n->a->kind != N_UNARY || n->a->op != T_STAR)
+                die("line %d: store wants *pointer", n->line);
+            gen_expr(n->b);
+            emit_push("%rax");
+            gen_expr(n->a->a);
+            emit_pop("%rcx");
+            emit("    mov %%rcx, (%%rax)");
+            return;
         case N_PRINT:
             if (expr_is_str(n->a)) {
                 gen_expr(n->a);

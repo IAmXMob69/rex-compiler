@@ -47,7 +47,27 @@ fn main() {
 }
 ```
 
-A string can be stored and printed. It is not a number.
+A string can be stored and printed. `s[i]` is the byte at that slot. `len(s)` is the length.
+
+You can take the address of a number, write through it, and ask the kernel for a heap block. A struct is a fixed group of numbers.
+
+```
+struct Point { x; y; }
+
+fn main() {
+    let x = 40;
+    let p = &x;
+    *p = 2;
+    let a = alloc(3);
+    a[0] = x;
+    print(len(a));
+    free(a);
+    let pt = Point;
+    pt.x = 40;
+    pt.y = 2;
+    print(pt.x + pt.y);
+}
+```
 
 ```
 fn main() {
@@ -109,4 +129,4 @@ rex asm examples/functions.rex
 
 ## Limits
 
-No text values except strings you can store and print. No structs. No pointers you can do math on. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
+No pointer arithmetic. A struct stays in the function that created it. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
