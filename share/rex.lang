@@ -33,6 +33,9 @@
           <keyword>else</keyword>
           <keyword>while</keyword>
           <keyword>for</keyword>
+          <keyword>switch</keyword>
+          <keyword>case</keyword>
+          <keyword>default</keyword>
           <keyword>continue</keyword>
           <keyword>break</keyword>
           <keyword>print</keyword>

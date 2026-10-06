@@ -35,7 +35,7 @@ fn main() {
 }
 ```
 
-`for` and `while` loop. `break` leaves the loop.
+`for` and `while` loop. `break` leaves the loop. `continue` skips to the next step. `switch` picks one constant case and does not fall through. `'A'` is a number. `#define NAME 10` is an integer constant.
 
 ```
 fn main() {
@@ -49,7 +49,7 @@ fn main() {
 
 A string can be stored and printed. `s[i]` is the byte at that slot. `len(s)` is the length.
 
-You can take the address of a number, write through it, and ask the kernel for a heap block. A struct is a fixed group of numbers.
+You can take the address of a number or a struct. `p + 1` moves one number. `p - a` is how many slots apart they are. `p->x` reads a field through a struct pointer. A file-level `let g = 40;` is a global you can assign later.
 
 ```
 struct Point { x; y; }
@@ -129,4 +129,4 @@ rex asm examples/functions.rex
 
 ## Limits
 
-No pointer arithmetic. A struct stays in the function that created it. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
+No nested structs. A struct stays in the function that created it, unless you pass its address. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.

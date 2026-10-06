@@ -16,17 +16,17 @@
  * No LLVM. The empire does not rent its code generator.
  */
 
-#define REX_VERSION "0.7.0"
+#define REX_VERSION "0.8.0"
 
 #ifndef REX_PREFIX
 #define REX_PREFIX "/usr/local"
 #endif
 
 typedef enum {
-    T_EOF = 0, T_FN, T_LET, T_IF, T_ELSE, T_WHILE, T_FOR, T_BREAK, T_CONTINUE, T_PRINT, T_EXEC,
+    T_EOF = 0, T_FN, T_LET, T_IF, T_ELSE, T_WHILE, T_FOR, T_BREAK, T_CONTINUE, T_SWITCH, T_CASE, T_DEFAULT, T_PRINT, T_EXEC,
     T_RETURN, T_READ, T_STRUCT, T_IDENT, T_NUM, T_STR,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_LBRACK, T_RBRACK, T_SEMI, T_COMMA, T_EQ,
-    T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT, T_AMP, T_DOT, T_ARROW,
+    T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT, T_AMP, T_DOT, T_ARROW, T_COLON,
     T_EQEQ, T_NE, T_LT, T_GT, T_LE, T_GE,
     T_ANDAND, T_OROR, T_BANG
 } TokKind;
@@ -42,7 +42,7 @@ typedef struct {
 typedef enum {
     N_PROGRAM, N_FN, N_BLOCK, N_LET, N_ASSIGN, N_PRINT, N_EXEC,
     N_RETURN, N_IF, N_WHILE, N_FOR, N_BREAK, N_EXPRSTMT, N_BIN, N_UNARY, N_NUM,
-    N_STR, N_VAR, N_CALL, N_READ, N_INDEX, N_ADDR, N_FIELD, N_STORE, N_CONTINUE
+    N_STR, N_VAR, N_CALL, N_READ, N_INDEX, N_ADDR, N_FIELD, N_STORE, N_CONTINUE, N_SWITCH
 } NodeKind;
 
 typedef struct Node Node;
@@ -92,6 +92,15 @@ static int g_depth;
 static FnCtx *g_fn;
 static int g_break = -1;
 static int g_cont = -1;
+
+typedef struct { char *name; long val; } Macro;
+static Macro g_macros[64];
+static int g_nmacros;
+
+static int macro_find(const char *name) {
+    for (int i = 0; i < g_nmacros; i++) if (!strcmp(g_macros[i].name, name)) return i;
+    return -1;
+}
 static char **g_fns;
 static int *g_arity;
 static int g_nfn;
@@ -202,6 +211,39 @@ static void lex_next(Lexer *L) {
             i += 2; L->col += 2;
             continue;
         }
+        if (s[i] == '#') {
+            int h = i;
+            while (h < L->len && s[h] != '\n') h++;
+            int k = i + 1;
+            while (k < h && (s[k] == ' ' || s[k] == '\t')) k++;
+            if (h - k >= 6 && !strncmp(s + k, "define", 6) && (k + 6 == h || s[k + 6] == ' ' || s[k + 6] == '\t')) {
+                k += 6;
+                while (k < h && (s[k] == ' ' || s[k] == '\t')) k++;
+                int ns = k;
+                while (k < h && (isalnum((unsigned char)s[k]) || s[k] == '_')) k++;
+                if (k == ns) die("%s:%d: #define wants a name", L->path, L->line);
+                while (k < h && (s[k] == ' ' || s[k] == '\t')) k++;
+                if (k >= h || !isdigit((unsigned char)s[k])) die("%s:%d: #define wants an integer", L->path, L->line);
+                long v = 0;
+                while (k < h && isdigit((unsigned char)s[k])) {
+                    v = v * 10 + (s[k] - '0');
+                    k++;
+                }
+                if (g_nmacros >= 64) die("too many #define");
+                g_macros[g_nmacros].name = xstrndup(s + ns, (size_t)(k > ns ? (strchr(s + ns, ' ') ? strchr(s + ns, ' ') - (s + ns) : k - ns) : 0));
+                /* name length is the identifier span, not the value span */
+                free(g_macros[g_nmacros].name);
+                int ne = ns;
+                while (ne < h && (isalnum((unsigned char)s[ne]) || s[ne] == '_')) ne++;
+                g_macros[g_nmacros].name = xstrndup(s + ns, (size_t)(ne - ns));
+                g_macros[g_nmacros].val = v;
+                g_nmacros++;
+            } else {
+                die("%s:%d: only #define NAME integer is supported", L->path, L->line);
+            }
+            i = h;
+            continue;
+        }
         break;
     }
     Token t;
@@ -230,12 +272,24 @@ static void lex_next(Lexer *L) {
         else if (startswith_kw(t.text, "for", n)) t.kind = T_FOR;
         else if (startswith_kw(t.text, "break", n)) t.kind = T_BREAK;
         else if (startswith_kw(t.text, "continue", n)) t.kind = T_CONTINUE;
+        else if (startswith_kw(t.text, "switch", n)) t.kind = T_SWITCH;
+        else if (startswith_kw(t.text, "case", n)) t.kind = T_CASE;
+        else if (startswith_kw(t.text, "default", n)) t.kind = T_DEFAULT;
         else if (startswith_kw(t.text, "print", n)) t.kind = T_PRINT;
         else if (startswith_kw(t.text, "exec", n)) t.kind = T_EXEC;
         else if (startswith_kw(t.text, "return", n)) t.kind = T_RETURN;
         else if (startswith_kw(t.text, "read", n)) t.kind = T_READ;
         else if (startswith_kw(t.text, "struct", n)) t.kind = T_STRUCT;
         else t.kind = T_IDENT;
+        if (t.kind == T_IDENT) {
+            int m = macro_find(t.text);
+            if (m >= 0) {
+                free(t.text);
+                t.text = NULL;
+                t.kind = T_NUM;
+                t.num = g_macros[m].val;
+            }
+        }
         L->col += n;
         L->pos = i;
         L->tok = t;
@@ -299,6 +353,29 @@ static void lex_next(Lexer *L) {
         L->tok = t;
         return;
     }
+    if (c == '\'') {
+        int col = L->col;
+        i++; L->col++;
+        if (i >= L->len) die("%s:%d: unterminated character", L->path, L->line);
+        char ch = s[i];
+        if (ch == '\\' && i + 1 < L->len) {
+            i++; L->col++;
+            char e = s[i];
+            if (e == 'n') ch = '\n';
+            else if (e == 't') ch = '\t';
+            else if (e == '0') ch = 0;
+            else ch = e;
+        }
+        i++; L->col++;
+        if (i >= L->len || s[i] != '\'') die("%s:%d: unterminated character", L->path, L->line);
+        i++; L->col++;
+        t.kind = T_NUM;
+        t.num = (unsigned char)ch;
+        t.col = col;
+        L->pos = i;
+        L->tok = t;
+        return;
+    }
     int col = L->col;
     if (i + 1 < L->len) {
         if (s[i] == '=' && s[i + 1] == '=') { t.kind = T_EQEQ; L->pos = i + 2; L->col += 2; t.col = col; L->tok = t; return; }
@@ -311,6 +388,7 @@ static void lex_next(Lexer *L) {
     }
     TokKind k = T_EOF;
     switch (c) {
+        case ':': k = T_COLON; break;
         case '&': k = T_AMP; break;
         case '.': k = T_DOT; break;
         case '(': k = T_LPAREN; break;
@@ -609,6 +687,34 @@ static Node *parse_stmt(Lexer *L) {
             if (L->tok.kind == T_IF) n->c = parse_stmt(L);
             else n->c = parse_block(L);
         }
+        return n;
+    }
+    if (t.kind == T_SWITCH) {
+        lex_next(L);
+        expect(L, T_LPAREN, "'('");
+        Node *n = node_new(N_SWITCH, t.line);
+        n->a = parse_expr(L);
+        expect(L, T_RPAREN, "')'");
+        expect(L, T_LBRACE, "'{'");
+        while (L->tok.kind != T_RBRACE && L->tok.kind != T_EOF) {
+            Node *arm = node_new(N_SWITCH, L->tok.line);
+            if (L->tok.kind == T_CASE) {
+                lex_next(L);
+                if (L->tok.kind != T_NUM) die("line %d: case wants a constant", L->tok.line);
+                arm->num = L->tok.num;
+                lex_next(L);
+                expect(L, T_COLON, "':'");
+            } else if (L->tok.kind == T_DEFAULT) {
+                lex_next(L);
+                expect(L, T_COLON, "':'");
+                arm->num = LONG_MIN;
+            } else {
+                die("line %d: expected case or default", L->tok.line);
+            }
+            arm->a = parse_stmt(L);
+            node_add(n, arm);
+        }
+        expect(L, T_RBRACE, "'}'");
         return n;
     }
     if (t.kind == T_WHILE) {
@@ -1506,6 +1612,26 @@ static void gen_stmt(Node *n) {
             if (g_cont < 0) die("line %d: continue outside a loop", n->line);
             emit("    jmp .L%d", g_cont);
             return;
+        case N_SWITCH: {
+            int end = newlbl();
+            gen_expr(n->a);
+            emit_push("%rax");
+            int def = -1;
+            for (int i = 0; i < n->nkids; i++) {
+                if (n->kids[i]->num == LONG_MIN) { def = i; continue; }
+                int next = newlbl();
+                emit("    mov (%%rsp), %%rax");
+                emit("    cmp $%ld, %%rax", n->kids[i]->num);
+                emit("    jne .L%d", next);
+                gen_stmt(n->kids[i]->a);
+                emit("    jmp .L%d", end);
+                emit(".L%d:", next);
+            }
+            if (def >= 0) gen_stmt(n->kids[def]->a);
+            emit(".L%d:", end);
+            emit_pop("%rax");
+            return;
+        }
         default:
             die("line %d: not a statement", n->line);
     }

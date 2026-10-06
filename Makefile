@@ -55,6 +55,8 @@ test: rex
 	REX_RUNTIME=src/rexrt.c ./rex run examples/cont.rex | cmp - examples/cont.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/arrow.rex | cmp - examples/arrow.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/global.rex | cmp - examples/global.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/switch.rex | cmp - examples/switch.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/ptrptr.rex | cmp - examples/ptrptr.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/logic.rex | cmp - examples/logic.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/array.rex | cmp - examples/array.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/for.rex | cmp - examples/for.out

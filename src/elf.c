@@ -160,6 +160,8 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "sub %rdi, %rsi")) { emitb(0x48); emitb(0x29); emitb(0xfe); return; }
     if (!strcmp(line, "sub %rcx, %rdx")) { emitb(0x48); emitb(0x29); emitb(0xca); return; }
     if (!strcmp(line, "mov (%rax), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x00); return; }
+    if (!strcmp(line, "mov (%rsp), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x04); emitb(0x24); return; }
+    if (sscanf(line, "cmp $%li, %%rax", &imm) == 1) { emitb(0x48); emitb(0x3d); emit32((int)imm); return; }
     if (!strcmp(line, "sar $3, %rax")) { emitb(0x48); emitb(0xc1); emitb(0xf8); emitb(0x03); return; }
     if (!strcmp(line, "mov %rdx, %rcx")) { emitb(0x48); emitb(0x89); emitb(0xd1); return; }
     if (sscanf(line, "mov %ld(%%rax), %%rax", &imm) == 1 && imm >= 0 && imm < 128) { emitb(0x48); emitb(0x8b); emitb(0x40); emitb((unsigned)imm); return; }
