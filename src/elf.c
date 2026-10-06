@@ -151,6 +151,7 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "mov %rsp, %rsi")) { emitb(0x48); emitb(0x89); emitb(0xe6); return; }
     if (!strcmp(line, "mov %rax, %rcx")) { emitb(0x48); emitb(0x89); emitb(0xc1); return; }
     if (!strcmp(line, "mov %rax, (%rcx)")) { emitb(0x48); emitb(0x89); emitb(0x01); return; }
+    if (!strcmp(line, "mov %dil, -1(%rbp)")) { emitb(0x40); emitb(0x88); emitb(0x7d); emitb(0xff); return; }
     if (!strcmp(line, "movb $0, (%rcx,%rax)")) { emitb(0xc6); emitb(0x04); emitb(0x01); emitb(0x00); return; }
     if (!strcmp(line, "mov %rcx, %rax")) { emitb(0x48); emitb(0x89); emitb(0xc8); return; }
     if (!strcmp(line, "mov %rax, %rdi")) { emitb(0x48); emitb(0x89); emitb(0xc7); return; }
@@ -172,6 +173,7 @@ static void asm_line(char *raw) {
     if (sscanf(line, "mov %%rcx, %ld(%%rax)", &imm) == 1 && imm >= 0 && imm < 128) { emitb(0x48); emitb(0x89); emitb(0x48); emitb((unsigned)imm); return; }
     if (sscanf(line, ".quad %li", &imm) == 1) { emit64((uint64_t)imm); return; }
     if (sscanf(line, "mov %95[^()](%%rip), %%rax", name) == 1 && strstr(line, "(%rip), %rax")) { emitb(0x48); emitb(0x8b); emitb(0x05); rel32(name); return; }
+    if (sscanf(line, "mov %95[^()](%%rip), %%rdi", name) == 1 && strstr(line, "(%rip), %rdi")) { emitb(0x48); emitb(0x8b); emitb(0x3d); rel32(name); return; }
     if (sscanf(line, "mov %%rax, %95[^()](%%rip)", name) == 1 && strstr(line, "(%rip)")) { emitb(0x48); emitb(0x89); emitb(0x05); rel32(name); return; }
     if (!strcmp(line, "mov %rcx, (%rax)")) { emitb(0x48); emitb(0x89); emitb(0x08); return; }
     if (!strcmp(line, "mov %rdi, (%rax)")) { emitb(0x48); emitb(0x89); emitb(0x38); return; }
@@ -250,6 +252,7 @@ static void asm_line(char *raw) {
     if (!strcmp(line, "movzx %al, %eax")) { emitb(0x0f); emitb(0xb6); emitb(0xc0); return; }
     if (!strcmp(line, "lea -1(%rbp), %rcx")) { emitb(0x48); emitb(0x8d); emitb(0x4d); emitb(0xff); return; }
     if (!strcmp(line, "lea -1(%rbp), %rdx")) { emitb(0x48); emitb(0x8d); emitb(0x55); emitb(0xff); return; }
+    if (!strcmp(line, "lea -1(%rbp), %rsi")) { emitb(0x48); emitb(0x8d); emitb(0x75); emitb(0xff); return; }
     if (!strcmp(line, "lea -24(%rbp), %rsi")) { emitb(0x48); emitb(0x8d); emitb(0x75); emitb(0xe8); return; }
     if (!strcmp(line, "lea 24(%rsp), %rdx")) { emitb(0x48); emitb(0x8d); emitb(0x54); emitb(0x24); emitb(0x18); return; }
     if (!strcmp(line, "mov %rax, (%rsp)")) { emitb(0x48); emitb(0x89); emitb(0x04); emitb(0x24); return; }
@@ -304,6 +307,7 @@ static void asm_line(char *raw) {
     if (sscanf(line, "jmp %95s", name) == 1) { emitb(0xe9); rel32(name); return; }
     if (sscanf(line, "je %95s", name) == 1) { emitb(0x0f); emitb(0x84); rel32(name); return; }
     if (sscanf(line, "jne %95s", name) == 1 || sscanf(line, "jnz %95s", name) == 1) { emitb(0x0f); emitb(0x85); rel32(name); return; }
+    if (sscanf(line, "jle %95s", name) == 1) { emitb(0x0f); emitb(0x8e); rel32(name); return; }
     if (sscanf(line, "jl %95s", name) == 1) { emitb(0x0f); emitb(0x8c); rel32(name); return; }
     if (sscanf(line, "jg %95s", name) == 1) { emitb(0x0f); emitb(0x8f); rel32(name); return; }
     if (sscanf(line, "jns %95s", name) == 1) { emitb(0x0f); emitb(0x89); rel32(name); return; }
@@ -323,6 +327,7 @@ static const char *runtime =
     "rex_put_str:\npush %rbp\nmov %rsp, %rbp\nmov %rdi, %rsi\n"
     "rex_put_len:\ncmpb $0, (%rsi)\nje rex_put_go\ninc %rsi\njmp rex_put_len\n"
     "rex_put_go:\nsub %rdi, %rsi\nmov %rsi, %rdx\nmov %rdi, %rsi\nmov $1, %rax\nmov $1, %rdi\nsyscall\npop %rbp\nret\n"
+    "rex_putc:\npush %rbp\nmov %rsp, %rbp\nsub $16, %rsp\nmov %dil, -1(%rbp)\nlea -1(%rbp), %rsi\nmov $1, %rdx\nmov $1, %rax\nmov $1, %rdi\nsyscall\nmov %rbp, %rsp\npop %rbp\nret\n"
     "rex_put_int:\npush %rbp\nmov %rsp, %rbp\nsub $32, %rsp\nmov %rdi, %rax\n"
     "rex_puti_pos:\nlea -1(%rbp), %rcx\nmovb $10, (%rcx)\n"
     "test %rax, %rax\njnz rex_puti_loop\ndec %rcx\nmovb $48, (%rcx)\njmp rex_puti_out\n"
@@ -383,6 +388,19 @@ int rex_write_elf(const char *asm_text, const char *outpath) {
     save = NULL;
     for (char *ln = strtok_r(rt, "\n", &save); ln; ln = strtok_r(NULL, "\n", &save)) asm_line(ln);
     free(rt);
+    for (int i = 0; i < nrels; i++) {
+        if (!rels[i].name[0]) continue;
+        int id = lab_find(rels[i].name);
+        if (id < 0 || labels[id].off < 0) {
+            if (!strncmp(rels[i].name, "rex_g_", 6)) {
+                lab_def(rels[i].name);
+                emit64(0);
+            } else if (!strncmp(rels[i].name, "rexfn_", 6)) {
+                lab_def(rels[i].name);
+                emitb(0xc3);
+            }
+        }
+    }
     for (int i = 0; i < nrels; i++) {
         int id = lab_find(rels[i].name);
         if (id < 0 || labels[id].off < 0) {

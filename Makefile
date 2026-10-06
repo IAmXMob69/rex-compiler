@@ -73,7 +73,25 @@ test: rex
 	REX_RUNTIME=src/rexrt.c ./rex run examples/exec.rex | cmp - examples/exec.out
 	printf '42\n' | REX_RUNTIME=src/rexrt.c ./rex run examples/read.rex | cmp - examples/read.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/use_before.rex > /tmp/rexub.out 2> /tmp/rexub.err; \
-		test $$? -ne 0 && grep -q 'used before declaration' /tmp/rexub.err
+		test $$? -ne 0 && grep -q 'used before declaration' /tmp/rexub.err && grep -q '\^' /tmp/rexub.err
+	REX_RUNTIME=src/rexrt.c ./rex run examples/dup.rex > /tmp/rexd.out 2> /tmp/rexd.err; \
+		test $$? -ne 0 && grep -q 'already declared' /tmp/rexd.err && grep -q '\^' /tmp/rexd.err
+	REX_RUNTIME=src/rexrt.c ./rex run examples/badcall.rex > /tmp/rexc.out 2> /tmp/rexc.err; \
+		test $$? -ne 0 && grep -q 'wants 1 argument' /tmp/rexc.err && grep -q '\^' /tmp/rexc.err
+	REX_RUNTIME=src/rexrt.c ./rex run examples/recover.rex > /tmp/rexr.out 2> /tmp/rexr.err; \
+		test $$? -ne 0 && grep -c 'error:' /tmp/rexr.err | grep -q 2
+	REX_RUNTIME=src/rexrt.c ./rex run examples/typemix.rex > /tmp/rext.out 2> /tmp/rext.err; \
+		test $$? -ne 0 && grep -q 'string is not a number' /tmp/rext.err
+	REX_RUNTIME=src/rexrt.c ./rex run examples/typearr.rex > /tmp/rexa.out 2> /tmp/rexa.err; \
+		test $$? -ne 0 && grep -q 'array is not printable' /tmp/rexa.err
+	REX_RUNTIME=src/rexrt.c ./rex run examples/typed.rex | cmp - examples/typed.out
+	REX_RUNTIME=src/rexrt.c ./rex run examples/typedbad.rex > /tmp/rextb.out 2> /tmp/rextb.err; \
+		test $$? -ne 0 && grep -q 'is int, initializer is not' /tmp/rextb.err
+	REX_RUNTIME=src/rexrt.c ./rex run examples/ret.rex | cmp - examples/ret.out
+	REX_RUNTIME=src/rexrt.c ./rex check examples/retbad.rex > /tmp/rexrb.out 2> /tmp/rexrb.err; \
+		test $$? -ne 0 && grep -q 'return is not an int' /tmp/rexrb.err
+	REX_RUNTIME=src/rexrt.c ./rex check examples/callbad.rex > /tmp/rexcb.out 2> /tmp/rexcb.err; \
+		test $$? -ne 0 && grep -q 'argument 1 has the wrong type' /tmp/rexcb.err
 	REX_RUNTIME=src/rexrt.c ./rex run examples/divzero.rex > /tmp/rexdz.out 2> /tmp/rexdz.err; \
 		test $$? -eq 1 && grep -q 'division by zero' /tmp/rexdz.err
 	printf '%s\n' 'fn main() { print(7); }' > /tmp/rexstdin.rex

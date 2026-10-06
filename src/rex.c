@@ -16,7 +16,7 @@
  * No LLVM. The empire does not rent its code generator.
  */
 
-#define REX_VERSION "0.13.0"
+#define REX_VERSION "0.15.0"
 
 #ifndef REX_PREFIX
 #define REX_PREFIX "/usr/local"
@@ -84,6 +84,7 @@ typedef struct {
     int slots;
     int stack;
     int is_main;
+    int ret_ty;
 } FnCtx;
 
 static FILE *g_out;
@@ -92,6 +93,9 @@ static int g_depth;
 static FnCtx *g_fn;
 static int g_break = -1;
 static int g_cont = -1;
+static char *g_src;
+static char *g_path;
+static int col_of(int line, const char *name);
 
 typedef struct { char *name; long val; } Macro;
 static Macro g_macros[64];
@@ -103,6 +107,7 @@ static int macro_find(const char *name) {
 }
 static char **g_fns;
 static int *g_arity;
+static int *g_pty;
 static int g_nfn;
 static int g_err;
 static char g_tmpasm[64];
@@ -138,14 +143,44 @@ static void die(const char *fmt, ...) {
     exit(1);
 }
 
+static void show_line(int line, int col) {
+    if (!g_src || line < 1) return;
+    int n = 1;
+    const char *p = g_src;
+    while (*p && n < line) {
+        if (*p == '\n') n++;
+        p++;
+    }
+    const char *end = p;
+    while (*end && *end != '\n') end++;
+    fprintf(stderr, "    %.*s\n", (int)(end - p), p);
+    fputs("    ", stderr);
+    int mark = col < 1 ? 1 : col;
+    for (int i = 1; i < mark && i < 200; i++) fputc(' ', stderr);
+    fputs("^\n", stderr);
+}
+
 static void error_at(int line, int col, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "rex:%d:%d: error: ", line, col);
+    fprintf(stderr, "%s:%d:%d: error: ", g_path ? g_path : "rex", line, col);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);
+    show_line(line, col);
     g_err++;
+}
+
+static void fail_at(int line, int col, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "%s:%d:%d: error: ", g_path ? g_path : "rex", line, col);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+    show_line(line, col);
+    g_err++;
+    die("aborting after %d error%s", g_err, g_err == 1 ? "" : "s");
 }
 
 static char *xstrdup(const char *s) {
@@ -207,7 +242,7 @@ static void lex_next(Lexer *L) {
                 else L->col++;
                 i++;
             }
-            if (i + 1 >= L->len) die("%s:%d: unterminated block comment", L->path, L->line);
+            if (i + 1 >= L->len) fail_at(L->line, L->col, "unterminated block comment");
             i += 2; L->col += 2;
             continue;
         }
@@ -342,7 +377,7 @@ static void lex_next(Lexer *L) {
         if (!buf) die("out of memory");
         while (i < L->len && s[i] != '"') {
             char ch = s[i];
-            if (ch == '\n') die("%s:%d: unterminated string", L->path, L->line);
+            if (ch == '\n') fail_at(L->line, L->col, "unterminated string");
             if (ch == '\\' && i + 1 < L->len) {
                 i++; L->col++;
                 char e = s[i];
@@ -359,7 +394,7 @@ static void lex_next(Lexer *L) {
             buf[n++] = ch;
             i++; L->col++;
         }
-        if (i >= L->len || s[i] != '"') die("%s:%d: unterminated string", L->path, t.line);
+        if (i >= L->len || s[i] != '"') fail_at(t.line, t.col, "unterminated string");
         i++; L->col++;
         buf[n] = 0;
         t.kind = T_STR;
@@ -436,7 +471,7 @@ static void lex_next(Lexer *L) {
         case '<': k = T_LT; break;
         case '>': k = T_GT; break;
         default:
-            die("%s:%d:%d: stray character '%c'", L->path, L->line, L->col, c);
+            fail_at(L->line, L->col, "stray character '%c'", c);
     }
     t.kind = k;
     t.col = col;
@@ -445,12 +480,26 @@ static void lex_next(Lexer *L) {
     L->tok = t;
 }
 
+static int g_panic;
+
 static void expect(Lexer *L, TokKind k, const char *what) {
-    if (L->tok.kind != k) {
-        error_at(L->tok.line, L->tok.col, "expected %s", what);
-        die("aborting after parse error");
+    if (L->tok.kind == k) {
+        g_panic = 0;
+        lex_next(L);
+        return;
     }
-    lex_next(L);
+    if (!g_panic) error_at(L->tok.line, L->tok.col, "expected %s", what);
+    g_panic = 1;
+}
+
+static void sync_stmt(Lexer *L) {
+    int guard = 0;
+    while (L->tok.kind != T_SEMI && L->tok.kind != T_RBRACE && L->tok.kind != T_EOF && guard < 1000) {
+        lex_next(L);
+        guard++;
+    }
+    if (L->tok.kind == T_SEMI) lex_next(L);
+    g_panic = 0;
 }
 
 static Node *parse_expr(Lexer *L);
@@ -467,7 +516,7 @@ static void parse_args(Lexer *L, Node *call) {
         lex_next(L);
     }
     expect(L, T_RPAREN, "')'");
-    if (call->nkids > 6) die("line %d: at most 6 arguments", call->line);
+    if (call->nkids > 6) fail_at(call->line, 1, "at most 6 arguments");
 }
 
 static Node *parse_primary(Lexer *L) {
@@ -518,8 +567,12 @@ static Node *parse_primary(Lexer *L) {
         return n;
     }
     error_at(t.line, t.col, "expected expression");
-    die("aborting after parse error");
-    return NULL;
+    g_panic = 1;
+    Node *bad = node_new(N_NUM, t.line);
+    bad->num = 0;
+    if (L->tok.kind != T_EOF && L->tok.kind != T_SEMI && L->tok.kind != T_RBRACE && L->tok.kind != T_RPAREN)
+        lex_next(L);
+    return bad;
 }
 
 static Node *parse_primary(Lexer *L);
@@ -752,14 +805,30 @@ static Node *parse_stmt(Lexer *L) {
     Token t = L->tok;
     if (t.kind == T_LET) {
         lex_next(L);
-        if (L->tok.kind != T_IDENT) die("%s: expected name after let", L->path);
+        if (L->tok.kind != T_IDENT) {
+            error_at(L->tok.line, L->tok.col, "expected name after let");
+            g_panic = 1;
+            sync_stmt(L);
+            return node_new(N_EXPRSTMT, t.line);
+        }
         Node *n = node_new(N_LET, t.line);
         n->name = xstrdup(L->tok.text);
         lex_next(L);
+        if (L->tok.kind == T_COLON) {
+            lex_next(L);
+            if (L->tok.kind != T_IDENT) {
+                error_at(L->tok.line, L->tok.col, "expected int, str, or ptr");
+                g_panic = 1;
+            } else if (!strcmp(L->tok.text, "int")) n->op = 1;
+            else if (!strcmp(L->tok.text, "str")) n->op = -1;
+            else if (!strcmp(L->tok.text, "ptr")) n->op = -2;
+            else error_at(L->tok.line, L->tok.col, "unknown type '%s'", L->tok.text);
+            if (L->tok.kind == T_IDENT) lex_next(L);
+        }
         if (L->tok.kind == T_LBRACK) {
             lex_next(L);
             if (L->tok.kind != T_NUM || L->tok.num < 1 || L->tok.num > 64)
-                die("line %d: array length must be a constant from 1 to 64", L->tok.line);
+                fail_at(L->tok.line, L->tok.col, "array length must be a constant from 1 to 64");
             n->num = L->tok.num;
             lex_next(L);
             expect(L, T_RBRACK, "']'");
@@ -963,11 +1032,14 @@ static Node *parse_stmt(Lexer *L) {
             return n;
         }
         error_at(line, t.col, "expected '=' or '(' after name");
-        die("aborting after parse error");
+        g_panic = 1;
+        sync_stmt(L);
+        return node_new(N_EXPRSTMT, line);
     }
     error_at(t.line, t.col, "expected statement");
-    die("aborting after parse error");
-    return NULL;
+    g_panic = 1;
+    sync_stmt(L);
+    return node_new(N_EXPRSTMT, t.line);
 }
 
 static Node *parse_block(Lexer *L) {
@@ -975,7 +1047,13 @@ static Node *parse_block(Lexer *L) {
     expect(L, T_LBRACE, "'{'");
     Node *n = node_new(N_BLOCK, line);
     while (L->tok.kind != T_RBRACE && L->tok.kind != T_EOF) {
-        node_add(n, parse_stmt(L));
+        if (g_panic) sync_stmt(L);
+        if (L->tok.kind == T_RBRACE || L->tok.kind == T_EOF) break;
+        int before = g_err;
+        Node *s = parse_stmt(L);
+        (void)before;
+        if (g_panic) sync_stmt(L);
+        if (s) node_add(n, s);
     }
     expect(L, T_RBRACE, "'}'");
     return n;
@@ -1001,7 +1079,7 @@ static void parse_struct(Lexer *L) {
     g_nsd++;
 }
 
-typedef struct { char *name; long init; } Glob;
+typedef struct { char *name; long init; int kind; } Glob;
 static Glob g_globs[32];
 static int g_nglobs;
 
@@ -1080,8 +1158,16 @@ static Node *parse_program(Lexer *L) {
                 if (L->tok.kind != T_IDENT) die("line %d: expected parameter name", L->tok.line);
                 Node *param = node_new(N_VAR, L->tok.line);
                 param->name = xstrdup(L->tok.text);
-                node_add(fn, param);
                 lex_next(L);
+                if (L->tok.kind == T_COLON) {
+                    lex_next(L);
+                    if (L->tok.kind == T_IDENT && !strcmp(L->tok.text, "int")) param->op = 1;
+                    else if (L->tok.kind == T_IDENT && !strcmp(L->tok.text, "str")) param->op = -1;
+                    else if (L->tok.kind == T_IDENT && !strcmp(L->tok.text, "ptr")) param->op = -2;
+                    else error_at(L->tok.line, L->tok.col, "expected int, str, or ptr");
+                    if (L->tok.kind == T_IDENT) lex_next(L);
+                }
+                node_add(fn, param);
                 if (L->tok.kind != T_COMMA) break;
                 lex_next(L);
             }
@@ -1090,6 +1176,14 @@ static Node *parse_program(Lexer *L) {
         if (strcmp(fn->name, "main") == 0 && fn->nkids != 0)
             die("line %d: main() takes no parameters", line);
         expect(L, T_RPAREN, "')'");
+        if (L->tok.kind == T_COLON) {
+            lex_next(L);
+            if (L->tok.kind == T_IDENT && !strcmp(L->tok.text, "int")) fn->op = 1;
+            else if (L->tok.kind == T_IDENT && !strcmp(L->tok.text, "str")) fn->op = -1;
+            else if (L->tok.kind == T_IDENT && !strcmp(L->tok.text, "ptr")) fn->op = -2;
+            else error_at(L->tok.line, L->tok.col, "expected int, str, or ptr");
+            if (L->tok.kind == T_IDENT) lex_next(L);
+        }
         fn->a = parse_block(L);
         node_add(p, fn);
     }
@@ -1106,11 +1200,14 @@ static void collect_fns(Node *p) {
     g_nfn = p->nkids;
     g_fns = calloc((size_t)g_nfn, sizeof(char *));
     g_arity = calloc((size_t)g_nfn, sizeof(int));
-    if (!g_fns || !g_arity) die("out of memory");
+    g_pty = calloc((size_t)g_nfn * 6, sizeof(int));
+    if (!g_fns || !g_arity || !g_pty) die("out of memory");
     int saw_main = 0;
     for (int i = 0; i < p->nkids; i++) {
         g_fns[i] = p->kids[i]->name;
         g_arity[i] = p->kids[i]->nkids;
+        for (int a = 0; a < p->kids[i]->nkids && a < 6; a++)
+            g_pty[i * 6 + a] = p->kids[i]->kids[a]->op;
         if (strcmp(p->kids[i]->name, "main") == 0) saw_main = 1;
         for (int j = 0; j < i; j++) {
             if (strcmp(g_fns[j], g_fns[i]) == 0)
@@ -1127,7 +1224,7 @@ static int local_find(FnCtx *fn, const char *name) {
 }
 
 static int local_add_slots(FnCtx *fn, const char *name, int line, int count, int is_array) {
-    if (local_find(fn, name) >= 0) die("line %d: '%s' already declared", line, name);
+    if (local_find(fn, name) >= 0) fail_at(line, col_of(line, name), "'%s' already declared", name);
     if (count < 1) die("line %d: bad slot count", line);
     if (fn->nlocals >= 64) die("line %d: too many names", line);
     if (fn->slots + count > 64) die("line %d: too many locals (limit 64 slots)", line);
@@ -1146,11 +1243,29 @@ static int local_add(FnCtx *fn, const char *name, int line) {
     return local_add_slots(fn, name, line, 1, 0);
 }
 
+static int col_of(int line, const char *name) {
+    if (!g_src || !name || line < 1) return 1;
+    int n = 1;
+    const char *p = g_src;
+    while (*p && n < line) {
+        if (*p == '\n') n++;
+        p++;
+    }
+    const char *hit = strstr(p, name);
+    if (!hit) return 1;
+    return (int)(hit - p) + 1;
+}
+
 static void require_declared(FnCtx *fn, const char *name, int line) {
     int i = local_find(fn, name);
-    if (i < 0) die("line %d: unknown name '%s'", line, name);
-    if (!fn->locals[i].declared)
-        die("line %d: '%s' used before declaration", line, name);
+    if (i < 0) {
+        error_at(line, col_of(line, name), "unknown name '%s'", name);
+        die("aborting after %d error%s", g_err, g_err == 1 ? "" : "s");
+    }
+    if (!fn->locals[i].declared) {
+        error_at(line, col_of(line, name), "'%s' used before declaration", name);
+        die("aborting after %d error%s", g_err, g_err == 1 ? "" : "s");
+    }
 }
 
 static void scan_locals(FnCtx *fn, Node *n) {
@@ -1160,7 +1275,9 @@ static void scan_locals(FnCtx *fn, Node *n) {
             local_add_slots(fn, n->name, n->line, (int)n->num, 1);
         } else {
             int slot = local_add(fn, n->name, n->line);
-            if (n->a && n->a->kind == N_STR) fn->locals[slot].len = -1;
+            if (n->op == -1) fn->locals[slot].len = -1;
+            else if (n->op == -2) fn->locals[slot].len = -2;
+            else if (n->a && n->a->kind == N_STR) fn->locals[slot].len = -1;
             else if (n->a && n->a->kind == N_ADDR) {
                 fn->locals[slot].len = -2;
                 int j = local_find(fn, n->a->name);
@@ -1295,15 +1412,18 @@ static void gen_expr(Node *n) {
                     return;
                 }
                 int g = glob_find(n->name);
-                if (g < 0) die("line %d: unknown name '%s'", n->line, n->name);
+                if (g < 0) {
+                    error_at(n->line, col_of(n->line, n->name), "unknown name '%s'", n->name);
+                    die("aborting after %d error%s", g_err, g_err == 1 ? "" : "s");
+                }
                 emit("    mov rex_g_%s(%%rip), %%rax", n->name);
                 return;
             }
             require_declared(g_fn, n->name, n->line);
             if (g_fn->locals[i].len > 0)
-                die("line %d: array '%s' is not an integer", n->line, n->name);
+                fail_at(n->line, col_of(n->line, n->name), "array '%s' is not an integer", n->name);
             if (g_fn->locals[i].len == -3)
-                die("line %d: struct '%s' is not an integer", n->line, n->name);
+                fail_at(n->line, col_of(n->line, n->name), "struct '%s' is not an integer", n->name);
             emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
             return;
         }
@@ -1336,36 +1456,27 @@ static void gen_expr(Node *n) {
             return;
         }
         case N_INDEX: {
-            require_declared(g_fn, n->name, n->line);
             int i = local_find(g_fn, n->name);
+            int g = -1;
+            if (i < 0) {
+                g = glob_find(n->name);
+                if (g < 0) {
+                    error_at(n->line, col_of(n->line, n->name), "unknown name '%s'", n->name);
+                    die("aborting after %d error%s", g_err, g_err == 1 ? "" : "s");
+                }
+            } else require_declared(g_fn, n->name, n->line);
             int bad = newlbl();
             int ok = newlbl();
             int id = str_id++;
             remember_str(id, "index out of range");
-            if (g_fn->locals[i].len == -1 || g_fn->locals[i].len == 0) {
+            int heap = 0;
+            if (i >= 0 && (g_fn->locals[i].len == -2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs"))) heap = 1;
+            if (g >= 0 && g_globs[g].kind == 2) heap = 1;
+            if (heap) {
                 gen_expr(n->a);
                 emit_push("%rax");
-                emit("    mov -%d(%%rbp), %%rdi", g_fn->locals[i].offset);
-                emit_call("rex_strlen");
-                emit("    mov %%rax, %%rcx");
-                emit_pop("%rax");
-                emit("    cmp $0, %%rax");
-                emit("    jl .L%d", bad);
-                emit("    cmp %%rcx, %%rax");
-                emit("    jl .L%d", ok);
-                emit(".L%d:", bad);
-                emit("    lea .LS%d(%%rip), %%rdi", id);
-                emit_call("rex_fail");
-                emit(".L%d:", ok);
-                emit("    mov %%rax, %%rcx");
-                emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
-                emit("    movzbl (%%rax,%%rcx), %%eax");
-                return;
-            }
-            if (g_fn->locals[i].len == -2) {
-                gen_expr(n->a);
-                emit_push("%rax");
-                emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                if (g >= 0) emit("    mov rex_g_%s(%%rip), %%rax", n->name);
+                else emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
                 emit("    mov -8(%%rax), %%rdx");
                 emit_pop("%rcx");
                 emit("    cmp $0, %%rcx");
@@ -1376,24 +1487,47 @@ static void gen_expr(Node *n) {
                 emit("    lea .LS%d(%%rip), %%rdi", id);
                 emit_call("rex_fail");
                 emit(".L%d:", ok);
-                emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+                if (g >= 0) emit("    mov rex_g_%s(%%rip), %%rax", n->name);
+                else emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
                 emit("    mov (%%rax,%%rcx,8), %%rax");
                 return;
             }
-            if (g_fn->locals[i].len <= 0)
-                die("line %d: '%s' is not an array", n->line, n->name);
+            if (i >= 0 && g_fn->locals[i].len > 0) {
+                gen_expr(n->a);
+                emit("    cmp $0, %%rax");
+                emit("    jl .L%d", bad);
+                emit("    cmp $%d, %%rax", g_fn->locals[i].len);
+                emit("    jl .L%d", ok);
+                emit(".L%d:", bad);
+                emit("    lea .LS%d(%%rip), %%rdi", id);
+                emit_call("rex_fail");
+                emit(".L%d:", ok);
+                emit("    imul $8, %%rax");
+                emit("    neg %%rax");
+                emit("    mov -%d(%%rbp, %%rax), %%rax", g_fn->locals[i].offset);
+                return;
+            }
             gen_expr(n->a);
+            emit_push("%rax");
+            if (g >= 0) emit("    mov rex_g_%s(%%rip), %%rdi", n->name);
+            else emit("    mov -%d(%%rbp), %%rdi", g_fn->locals[i].offset);
+            emit_call("rex_strlen");
+            emit("    mov %%rax, %%rcx");
+            emit_pop("%rax");
             emit("    cmp $0, %%rax");
             emit("    jl .L%d", bad);
-            emit("    cmp $%d, %%rax", g_fn->locals[i].len);
-            emit("    jl .L%d", ok);
+            emit("    cmp %%rcx, %%rax");
+            emit("    jle .L%d", ok);
+            emit("    xor %%eax, %%eax");
+            emit("    jmp .L%d", ok);
             emit(".L%d:", bad);
             emit("    lea .LS%d(%%rip), %%rdi", id);
             emit_call("rex_fail");
             emit(".L%d:", ok);
-            emit("    imul $8, %%rax");
-            emit("    neg %%rax");
-            emit("    mov -%d(%%rbp, %%rax), %%rax", g_fn->locals[i].offset);
+            emit("    mov %%rax, %%rcx");
+            if (g >= 0) emit("    mov rex_g_%s(%%rip), %%rax", n->name);
+            else emit("    mov -%d(%%rbp), %%rax", g_fn->locals[i].offset);
+            emit("    movzbl (%%rax,%%rcx), %%eax");
             return;
         }
         case N_READ:
@@ -1420,6 +1554,13 @@ static void gen_expr(Node *n) {
                     return;
                 }
                 die("line %d: len() wants an array, string, or heap block", n->line);
+            }
+            if (strcmp(n->name, "putc") == 0) {
+                if (n->nkids != 1) die("line %d: putc() wants a character", n->line);
+                gen_expr(n->kids[0]);
+                emit("    mov %%rax, %%rdi");
+                emit_call("rex_putc");
+                return;
             }
             if (strcmp(n->name, "putn") == 0) {
                 if (n->nkids != 1) die("line %d: putn() wants a number", n->line);
@@ -1460,7 +1601,7 @@ static void gen_expr(Node *n) {
             if (want < 0) {
                 int slot = local_find(g_fn, n->name);
                 if (slot < 0 || g_fn->locals[slot].len != -4)
-                    die("line %d: unknown function '%s'", n->line, n->name);
+                    fail_at(n->line, col_of(n->line, n->name), "unknown function '%s'", n->name);
                 static const char *ireg[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
                 for (int i = 0; i < n->nkids; i++) {
                     gen_expr(n->kids[i]);
@@ -1477,9 +1618,9 @@ static void gen_expr(Node *n) {
                 }
                 return;
             }
-            if (strcmp(n->name, "main") == 0) die("line %d: do not call main", n->line);
+            if (strcmp(n->name, "main") == 0) fail_at(n->line, col_of(n->line, "main"), "do not call main");
             if (want != n->nkids)
-                die("line %d: %s() wants %d argument%s, got %d", n->line, n->name, want, want == 1 ? "" : "s", n->nkids);
+                fail_at(n->line, col_of(n->line, n->name), "%s() wants %d argument%s, got %d", n->name, want, want == 1 ? "" : "s", n->nkids);
             static const char *areg[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
             for (int i = 0; i < n->nkids; i++) {
                 gen_expr(n->kids[i]);
@@ -1708,7 +1849,34 @@ static void gen_stmt(Node *n) {
             if (i < 0) {
                 int g = glob_find(n->name);
                 if (g < 0) die("line %d: unknown name '%s'", n->line, n->name);
+                if (n->b) {
+                    gen_expr(n->b);
+                    emit_push("%rax");
+                    gen_expr(n->a);
+                    emit_push("%rax");
+                    emit("    mov rex_g_%s(%%rip), %%rax", n->name);
+                    emit("    mov -8(%%rax), %%rdx");
+                    emit_pop("%rcx");
+                    int bad = newlbl();
+                    int ok = newlbl();
+                    int id = str_id++;
+                    remember_str(id, "index out of range");
+                    emit("    cmp $0, %%rcx");
+                    emit("    jl .L%d", bad);
+                    emit("    cmp %%rdx, %%rcx");
+                    emit("    jl .L%d", ok);
+                    emit(".L%d:", bad);
+                    emit("    lea .LS%d(%%rip), %%rdi", id);
+                    emit_call("rex_fail");
+                    emit(".L%d:", ok);
+                    emit("    mov rex_g_%s(%%rip), %%rax", n->name);
+                    emit_pop("%rdx");
+                    emit("    mov %%rdx, (%%rax,%%rcx,8)");
+                    return;
+                }
                 gen_expr(n->a);
+                if (n->a && n->a->kind == N_CALL && n->a->name && !strcmp(n->a->name, "load")) g_globs[g].kind = 1;
+                if (n->a && n->a->kind == N_CALL && n->a->name && !strcmp(n->a->name, "alloc")) g_globs[g].kind = 2;
                 emit("    mov %%rax, rex_g_%s(%%rip)", n->name);
                 return;
             }
@@ -1736,7 +1904,7 @@ static void gen_stmt(Node *n) {
                 return;
             }
             if (n->b) {
-                if (g_fn->locals[i].len == -2) {
+                if (g_fn->locals[i].len == -2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs")) {
                     gen_expr(n->b);
                     emit_push("%rax");
                     gen_expr(n->a);
@@ -1939,17 +2107,127 @@ static void gen_stmt(Node *n) {
     }
 }
 
+static int ty_of(Node *n) {
+    if (!n) return 0;
+    if (n->kind == N_STR) return -1;
+    if (n->kind == N_NUM || n->kind == N_READ) return 0;
+    if (n->kind == N_ADDR) return -2;
+    if (n->kind == N_CALL && n->name && !strcmp(n->name, "alloc")) return -2;
+    if (n->kind == N_CALL && n->name && !strcmp(n->name, "load")) return -1;
+    if (n->kind == N_VAR && n->name) {
+        int i = local_find(g_fn, n->name);
+        if (i >= 0) return g_fn->locals[i].len > 0 ? 1 : g_fn->locals[i].len;
+        if (fn_arity(n->name) >= 0) return -4;
+        return 0;
+    }
+    if (n->kind == N_INDEX) return 0;
+    if (n->kind == N_BIN && (n->op == T_PLUS || n->op == T_MINUS)) {
+        int a = ty_of(n->a);
+        int b = ty_of(n->b);
+        if (a == -1 || a == -2 || b == -1 || b == -2) return a == -1 || b == -1 ? -1 : -2;
+    }
+    return 0;
+}
+
+static void check_node(Node *n);
+
+static void need_num(Node *n, const char *what) {
+    int t = ty_of(n);
+    if (t == -1) error_at(n ? n->line : 1, col_of(n ? n->line : 1, n && n->name ? n->name : what), "string is not a number");
+    else if (t == 1) error_at(n ? n->line : 1, col_of(n ? n->line : 1, n && n->name ? n->name : what), "array is not an integer");
+    else if (t == -3) error_at(n ? n->line : 1, col_of(n ? n->line : 1, n && n->name ? n->name : what), "struct is not an integer");
+    else if (t == -4) error_at(n ? n->line : 1, col_of(n ? n->line : 1, n && n->name ? n->name : what), "function is not an integer");
+}
+
+static void check_node(Node *n) {
+    if (!n) return;
+    if (n->kind == N_BIN && n->op != T_EQEQ && n->op != T_NE && n->op != T_PLUS && n->op != T_MINUS && n->op != T_ANDAND && n->op != T_OROR) {
+        need_num(n->a, "left");
+        need_num(n->b, "right");
+    }
+    if (n->kind == N_BIN && (n->op == T_PLUS || n->op == T_MINUS)) {
+        int a = ty_of(n->a);
+        int b = ty_of(n->b);
+        if ((a == -1 || a == -2) && (b == -1 || b == -2) && n->op == T_PLUS)
+            error_at(n->line, 1, "cannot add two pointers");
+        if (a != -1 && a != -2 && b != -1 && b != -2) {
+            need_num(n->a, "left");
+            need_num(n->b, "right");
+        }
+    }
+    if (n->kind == N_RETURN && g_fn && g_fn->ret_ty) {
+        int src = n->a ? ty_of(n->a) : 0;
+        if (g_fn->ret_ty == 1 && src != 0)
+            error_at(n->line, col_of(n->line, "return"), "return is not an int");
+        if (g_fn->ret_ty == -1 && src != -1)
+            error_at(n->line, col_of(n->line, "return"), "return is not a string");
+        if (g_fn->ret_ty == -2 && src != -2)
+            error_at(n->line, col_of(n->line, "return"), "return is not a pointer");
+    }
+    if (n->kind == N_LET && n->op && n->a && n->a->kind != N_VAR) {
+        int src = ty_of(n->a);
+        if (n->op == 1 && src != 0)
+            error_at(n->line, col_of(n->line, n->name), "'%s' is int, initializer is not", n->name);
+        if (n->op == -1 && src != -1)
+            error_at(n->line, col_of(n->line, n->name), "'%s' is str, initializer is not", n->name);
+        if (n->op == -2 && src != -2)
+            error_at(n->line, col_of(n->line, n->name), "'%s' is ptr, initializer is not", n->name);
+    }
+    if (n->kind == N_LET && n->num == 0 && n->a && n->a->kind != N_VAR) {
+        int dest = 0;
+        int slot = local_find(g_fn, n->name);
+        if (slot >= 0) dest = g_fn->locals[slot].len;
+        int src = ty_of(n->a);
+        if (dest == 0 && (src == -1 || src == -2))
+            error_at(n->line, col_of(n->line, n->name), "integer '%s' cannot hold a %s", n->name, src == -1 ? "string" : "pointer");
+        if (dest == -1 && src != -1 && n->a->kind != N_STR)
+            error_at(n->line, col_of(n->line, n->name), "string '%s' needs a string", n->name);
+    }
+    if (n->kind == N_ASSIGN && n->name && !n->b && !n->str) {
+        int slot = local_find(g_fn, n->name);
+        if (slot >= 0 && g_fn->locals[slot].len == 0 && n->a && (ty_of(n->a) == -1 || ty_of(n->a) == 1 || ty_of(n->a) == -3))
+            error_at(n->line, col_of(n->line, n->name), "integer '%s' cannot hold that value", n->name);
+    }
+    if (n->kind == N_CALL && n->name && strcmp(n->name, "put") && strcmp(n->name, "print") && strcmp(n->name, "alloc") && strcmp(n->name, "load") && strcmp(n->name, "free") && strcmp(n->name, "len")) {
+        for (int fi = 0; fi < g_nfn; fi++) {
+            if (strcmp(g_fns[fi], n->name)) continue;
+            for (int a = 0; a < n->nkids && a < 6; a++) {
+                int want = g_pty[fi * 6 + a];
+                if (!want) continue;
+                int got = ty_of(n->kids[a]);
+                int ok = (want == 1 && got == 0) || (want == -1 && got == -1) || (want == -2 && got == -2);
+                if (!ok) error_at(n->line, col_of(n->line, n->name), "%s() argument %d has the wrong type", n->name, a + 1);
+            }
+        }
+    }
+    if (n->kind == N_CALL && n->name && !strcmp(n->name, "put") && n->nkids == 1 && ty_of(n->kids[0]) != -1)
+        error_at(n->line, col_of(n->line, "put"), "put() wants a string");
+    if (n->kind == N_PRINT && n->a) {
+        int t = ty_of(n->a);
+        if (t == 1 || t == -3 || t == -4)
+            error_at(n->line, col_of(n->line, n->a->name ? n->a->name : "print"), "%s is not printable", t == 1 ? "array" : t == -3 ? "struct" : "function");
+    }
+    check_node(n->a);
+    check_node(n->b);
+    check_node(n->c);
+    for (int i = 0; i < n->nkids; i++) check_node(n->kids[i]);
+}
+
 static void gen_fn2(Node *fn) {
     FnCtx ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.name = fn->name;
     ctx.is_main = strcmp(fn->name, "main") == 0;
+    ctx.ret_ty = fn->op;
     for (int i = 0; i < fn->nkids; i++) {
         int slot = local_add(&ctx, fn->kids[i]->name, fn->kids[i]->line);
         ctx.locals[slot].declared = 1;
+        if (fn->kids[i]->op) ctx.locals[slot].len = fn->kids[i]->op == 1 ? 0 : fn->kids[i]->op;
     }
     scan_locals(&ctx, fn->a);
     g_fn = &ctx;
+    check_node(fn->a);
+    if (g_err) die("aborting after %d error%s", g_err, g_err == 1 ? "" : "s");
     g_depth = 0;
     if (ctx.is_main) {
         emit(".globl main");
@@ -2062,6 +2340,7 @@ static void usage(void) {
         "usage:\n"
         "  rex run <file.rex>           compile and execute\n"
         "  rex build <file.rex> -o bin  emit a binary\n"
+        "  rex check <file.rex>         parse and type-check only\n"
         "  rex asm <file.rex>           write assembly to stdout\n"
         "  rex elf <file.s> -o bin    assemble emitted assembly\n"
         "  rex version\n",
@@ -2099,6 +2378,8 @@ int rex_write_elf(const char *asm_text, const char *outpath);
 static int compile_to(const char *srcpath, const char *outbin) {
     int len = 0;
     char *src = read_file(srcpath, &len);
+    g_src = src;
+    g_path = (char *)srcpath;
     Lexer L = {0};
     L.src = src;
     L.len = len;
@@ -2107,6 +2388,7 @@ static int compile_to(const char *srcpath, const char *outbin) {
     L.path = (char *)srcpath;
     lex_next(&L);
     Node *prog = parse_program(&L);
+    if (g_err) die("aborting after %d error%s", g_err, g_err == 1 ? "" : "s");
     char asmpath[] = "/tmp/rexXXXXXX.s";
     int fd = mkstemps(asmpath, 2);
     if (fd < 0) die("mkstemps: %s", strerror(errno));
@@ -2159,6 +2441,12 @@ int main(int argc, char **argv) {
         char *src = read_file(argv[2], &len);
         if (rex_write_elf(src, out) != 0) die("elf emission failed");
         free(src);
+        return 0;
+    }
+    if (strcmp(argv[1], "check") == 0) {
+        if (argc < 3) usage();
+        compile_to(argv[2], "/tmp/rexcheck.bin");
+        unlink("/tmp/rexcheck.bin");
         return 0;
     }
     if (strcmp(argv[1], "build") == 0) {
