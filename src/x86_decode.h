@@ -33,6 +33,8 @@ typedef enum {
     X86_NOP, X86_CQO, X86_SYSCALL,
     X86_ENDBR,          /* endbr64/endbr32: no-op for the lift */
     X86_LEAVE,          /* mov %rbp, %rsp; pop %rbp */
+    X86_HLT, X86_UD2,   /* terminators */
+    X86_CMOVCC,         /* cc in .cc; dst, src */
     X86_OP_COUNT
 } X86Opcode;
 

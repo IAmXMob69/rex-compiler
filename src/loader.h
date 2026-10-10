@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "elfread.h"
+#include "rex_err.h"
 
 /* Binary loader abstraction. One implementation today (ELF64); PE is a
  * recognition stub. Callers open through rex_bin_open / rex_bin_parse and
@@ -14,8 +15,8 @@
  * specific error without producing an image.
  */
 
-#define REX_BIN_ERR_UNRECOGNIZED 2
-#define REX_BIN_ERR_PE_STUB      3
+#define REX_BIN_ERR_UNRECOGNIZED REX_E100_UNRECOGNIZED
+#define REX_BIN_ERR_PE_STUB      REX_E101_PE_STUB
 
 typedef struct RexLoader RexLoader;
 

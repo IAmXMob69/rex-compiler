@@ -5,6 +5,7 @@
 #include <string.h>
 #include "decompiler.h"
 #include "loader.h"
+#include "rex_err.h"
 #include "cfg.h"
 #include "x86_lift.h"
 #include "ir.h"
@@ -376,6 +377,13 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         else ex_free(v);
         break;
     }
+    case IR_CMOV: {
+        /* REX has no ternary. Keep the source value; precise if/else recovery is future work. */
+        Ex src = op_ex(d, &in->a);
+        if (in->dst.kind == IR_O_REG) setr(d, in->dst.reg, src);
+        else ex_free(src);
+        break;
+    }
     case IR_CALL: {
         Fun *t = in->a.kind == IR_O_ADDR ? fby(d, in->a.addr) : NULL;
         const char *nm = "fn";
@@ -672,12 +680,12 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     RexElf e;
     CfgProgram p;
     char err[256];
-    { int _rc = rex_bin_open(inpath, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: decompile: %s\n", err); return _rc; } }
-    if (cfg_build(&e, &p, err, sizeof(err))) { fprintf(stderr, "rex: decompile: %s\n", err); rex_elf_free(&e); return 1; }
+    { int _rc = rex_bin_open(inpath, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: %s\n", err); return _rc; } }
+    { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { fprintf(stderr, "rex: %s\n", err); rex_elf_free(&e); return _c; } }
     IrModule *m = x86_lift(&p, err, sizeof(err));
-    if (!m) { fprintf(stderr, "rex: decompile: %s\n", err); cfg_free(&p); rex_elf_free(&e); return 1; }
+    if (!m) { fprintf(stderr, "rex: %s\n", err); cfg_free(&p); rex_elf_free(&e); return REX_E300_LIFT; }
     FILE *out = fopen(outpath, "w");
-    if (!out) { fprintf(stderr, "rex: decompile: cannot write %s\n", outpath); ir_module_free(m); cfg_free(&p); rex_elf_free(&e); return 1; }
+    if (!out) { fprintf(stderr, "rex: decompile: cannot write %s\n", outpath); ir_module_free(m); cfg_free(&p); rex_elf_free(&e); return REX_E600_DECOMPILE; }
 
     D d = {0};
     d.out = out; d.m = m; d.cfg = &p; d.verbose = verbose;

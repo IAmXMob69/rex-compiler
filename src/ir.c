@@ -119,7 +119,7 @@ static const char *opnames[IR_OP_COUNT] = {
     "add", "sub", "mul", "divs", "rems",
     "and", "or", "xor", "shl", "shr", "sar",
     "neg", "not", "zext", "sext",
-    "cmp", "test", "setcc",
+    "cmp", "test", "setcc", "cmov",
     "jmp", "br", "call", "ret",
     "push", "pop", "syscall", "trap",
 };

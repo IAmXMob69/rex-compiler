@@ -43,6 +43,7 @@ unit:
 	$(CC) $(CFLAGS) -o /tmp/rex_test_ir tests/test_ir.c src/ir.c && /tmp/rex_test_ir
 	$(CC) $(CFLAGS) -o /tmp/rex_test_elf tests/test_elf.c src/elfread.c && /tmp/rex_test_elf
 	$(CC) $(CFLAGS) -o /tmp/rex_test_loader tests/test_loader.c src/loader.c src/elfread.c && /tmp/rex_test_loader
+	$(CC) $(CFLAGS) -o /tmp/rex_test_err tests/test_err.c src/loader.c src/elfread.c && /tmp/rex_test_err
 	$(CC) $(CFLAGS) -o /tmp/rex_test_x86 tests/test_x86.c src/x86_decode.c && /tmp/rex_test_x86
 	$(CC) $(CFLAGS) -o /tmp/rex_test_cpu tests/test_cpu_diff.c src/ir.c src/x86_decode.c && /tmp/rex_test_cpu
 

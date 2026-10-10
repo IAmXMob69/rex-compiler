@@ -41,7 +41,7 @@ int main(void) {
 
     /* PE x86-64 PE32+ */
     size_t n = make_pe(img, sizeof(img), 0x8664, 0x20b);
-    total++; fails += expect_fail(img, n, REX_BIN_ERR_PE_STUB, "PE/COFF (x86-64, PE32+)", "pe64");
+    total++; fails += expect_fail(img, n, REX_BIN_ERR_PE_STUB, "E101:", "pe64");
     total++; fails += expect_fail(img, n, REX_BIN_ERR_PE_STUB, "not implemented yet", "pe64-msg");
 
     /* PE i386 PE32 */

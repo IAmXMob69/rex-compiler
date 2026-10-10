@@ -194,6 +194,8 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
         set2(out, op, e, cnt);
     } else if (b == 0xc9) {
         out->op = X86_LEAVE;
+    } else if (b == 0xf4) {
+        out->op = X86_HLT;
     } else if (b == 0xc3) {
         out->op = X86_RET;
     } else if (b == 0xc2) {
@@ -237,7 +239,12 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
     } else if (b == 0x0f) {
         unsigned b2 = get8(&r);
         if (b2 == 0x05) out->op = X86_SYSCALL;
-        else if (b2 == 0x1f) {
+        else if (b2 == 0x0b) out->op = X86_UD2;
+        else if (b2 >= 0x40 && b2 <= 0x4f) {
+            out->cc = b2 & 15;
+            e = modrm(&r, &c, v);
+            set2(out, X86_CMOVCC, reg_op(&c, c.reg, v), e);
+        } else if (b2 == 0x1f) {
             e = modrm(&r, &c, v);
             if ((c.reg & 7) != 0) goto bad;
             out->op = X86_NOP;
@@ -292,7 +299,7 @@ static const char *names[X86_OP_COUNT] = {
     "and", "or", "xor", "shl", "shr", "sar",
     "cmp", "test", "inc", "dec", "neg", "not",
     "jmp", "j", "set", "call", "ret",
-    "nop", "cqo", "syscall", "endbr64", "leave",
+    "nop", "cqo", "syscall", "endbr64", "leave", "hlt", "ud2", "cmov",
 };
 static const char *ccs[16] = { "o","no","b","ae","e","ne","be","a","s","ns","p","np","l","ge","le","g" };
 
@@ -336,6 +343,7 @@ void x86_format(const X86Insn *in, char *buf, size_t n) {
     case X86_JCC: snprintf(mn, sizeof(mn), "j%s", x86_cc_name(in->cc)); break;
     case X86_SETCC: snprintf(mn, sizeof(mn), "set%s", x86_cc_name(in->cc)); break;
     case X86_ENDBR: snprintf(mn, sizeof(mn), "%s", in->cc == 32 ? "endbr32" : "endbr64"); break;
+    case X86_CMOVCC: snprintf(mn, sizeof(mn), "cmov%s", x86_cc_name(in->cc)); break;
     case X86_CQO: snprintf(mn, sizeof(mn), "%s", in->ops[0].size == 8 ? "cqo" : in->ops[0].size == 2 ? "cwtd" : "cltd"); break;
     case X86_MOVZX: case X86_MOVSX:
         snprintf(mn, sizeof(mn), "%s%c%c", x86_op_name(in->op), suffix(in->ops[1].size), suffix(in->ops[0].size)); break;

@@ -309,6 +309,16 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
             eb(g, 0x0f); eb(g, 0x90 | cc); modrm_rr(g, 0, in->dst.reg);
             break;
         }
+        case IR_CMOV: {
+            int cc = cc_x86(in->cc);
+            if (in->dst.kind != IR_O_REG || in->a.kind != IR_O_REG) { cgfail(g, "cmov form"); break; }
+            int w = in->dst.width;
+            if (w != 4 && w != 8) { cgfail(g, "cmov width"); break; }
+            rex(g, w == 8, hi(in->dst.reg), 0, hi(in->a.reg));
+            eb(g, 0x0f); eb(g, 0x40 | cc);
+            modrm_rr(g, in->dst.reg, in->a.reg);
+            break;
+        }
         case IR_PUSH:
             if (in->a.kind == IR_O_REG) { if (hi(in->a.reg)) eb(g, 0x41); eb(g, 0x50 + (in->a.reg & 7)); }
             else if (in->a.kind == IR_O_IMM) {

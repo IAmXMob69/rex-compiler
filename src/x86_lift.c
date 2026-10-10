@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "x86_lift.h"
+#include "rex_err.h"
 
 enum { FL_NONE, FL_CMP, FL_RESULT };
 
@@ -21,12 +22,17 @@ typedef struct {
 static void lfail(L *l, const char *fmt, ...) {
     if (l->bad) return;
     l->bad = 1;
-    int k = snprintf(l->err, l->errlen, "%s at 0x%llx: ", l->cf->name, (unsigned long long)l->in->addr);
-    if (k < 0 || (size_t)k >= l->errlen) return;
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(l->err + k, l->errlen - (size_t)k, fmt, ap);
-    va_end(ap);
+    int code = REX_E300_LIFT;
+    if (l->in && (l->in->op == X86_IDIV || l->in->op == X86_DIV)) code = REX_E302_IDIV;
+    char detail[160];
+    int k = snprintf(detail, sizeof(detail), "%s at 0x%llx: ", l->cf->name, (unsigned long long)l->in->addr);
+    if (k < 0) k = 0;
+    if ((size_t)k < sizeof(detail)) {
+        va_list ap; va_start(ap, fmt);
+        vsnprintf(detail + k, sizeof(detail) - (size_t)k, fmt, ap);
+        va_end(ap);
+    }
+    rex_errf(l->err, l->errlen, code, "%s", detail);
 }
 
 static IrInsn *emit(L *l, IrOp op) {
@@ -108,6 +114,17 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
     switch (in->op) {
     case X86_NOP: case X86_ENDBR:
         break;
+    case X86_HLT: case X86_UD2:
+        emit(l, IR_TRAP);
+        break;
+    case X86_CMOVCC: {
+        IrCond c = cond(l, in->cc);
+        need_flags(l, c);
+        wrote(l, d);
+        i = emit(l, IR_CMOV); i->cc = c; i->dst = d; i->a = s;
+        zext32(l, d);
+        break;
+    }
     case X86_LEAVE:
         wrote(l, ir_reg(4, 8)); wrote(l, ir_reg(5, 8));
         i = emit(l, IR_MOV); i->dst = ir_reg(4, 8); i->a = ir_reg(5, 8);
@@ -216,6 +233,7 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         l->flags = FL_NONE;
         break;
     case X86_JMP: {
+        if (in->ops[0].kind != XO_REL) { emit(l, IR_TRAP); break; }
         int t = cfg_find_block(l->cf, in->ops[0].target);
         if (t < 0) { lfail(l, "jump target not in function"); break; }
         i = emit(l, IR_JMP); i->a = ir_blk(t);

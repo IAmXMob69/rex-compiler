@@ -4,15 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include "elfread.h"
+#include "rex_err.h"
 
 static int fail(char *err, size_t n, const char *fmt, ...) {
-    if (err && n) {
-        va_list ap;
-        va_start(ap, fmt);
-        vsnprintf(err, n, fmt, ap);
-        va_end(ap);
-    }
-    return -1;
+    char body[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    return rex_errf(err, n, REX_E102_ELF, "%s", body);
 }
 
 static uint16_t rd16(const unsigned char *p) { return (uint16_t)(p[0] | p[1] << 8); }

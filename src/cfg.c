@@ -3,15 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cfg.h"
+#include "rex_err.h"
 
 static int fail(char *err, size_t n, const char *fmt, ...) {
-    if (err && n) {
-        va_list ap;
-        va_start(ap, fmt);
-        vsnprintf(err, n, fmt, ap);
-        va_end(ap);
-    }
-    return -1;
+    char body[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    return rex_errf(err, n, REX_E400_CFG, "%s", body);
 }
 
 typedef struct { uint64_t *v; int n, cap; } AddrList;
@@ -105,7 +105,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
             if (map_get(&seen, a) >= 0) break;
             size_t avail;
             const unsigned char *p = rex_elf_code_at(e, a, &avail);
-            if (!p) { fail(err, errlen, "%s: code at 0x%llx is outside executable segments", f->name, (unsigned long long)a); goto out; }
+            if (!p) { rex_errf(err, errlen, REX_E403_NO_CODE, "%s: code at 0x%llx is outside executable segments", f->name, (unsigned long long)a); goto out; }
             if (n >= CFG_MAX_INSNS) { fail(err, errlen, "%s: too many instructions", f->name); goto out; }
             if (n == cap) {
                 int nc = cap ? cap * 2 : 256;
@@ -115,15 +115,15 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
             }
             X86Insn *in = &ins[n];
             if (!x86_decode(p, avail, a, in)) {
-                fail(err, errlen, "%s: unsupported or invalid instruction at 0x%llx (byte %02x)", f->name, (unsigned long long)a, p[0]);
+                rex_errf(err, errlen, REX_E200_OPCODE, "%s: unsupported or invalid instruction at 0x%llx (byte %02x)", f->name, (unsigned long long)a, p[0]);
                 goto out;
             }
             if (map_put(&seen, a, n)) goto oom;
             n++;
             uint64_t next = a + (uint64_t)in->size;
-            if (in->op == X86_RET) break;
+            if (in->op == X86_RET || in->op == X86_HLT || in->op == X86_UD2) break;
             if (in->op == X86_JMP) {
-                if (in->ops[0].kind != XO_REL) { fail(err, errlen, "%s: indirect jump at 0x%llx", f->name, (unsigned long long)a); goto out; }
+                if (in->ops[0].kind != XO_REL) break; /* E401 avoided: end block, no successors */
                 if (al_push(&work, in->ops[0].target) || al_push(&leaders, in->ops[0].target)) goto oom;
                 break;
             }
@@ -169,7 +169,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
     for (int i = 0; i < leaders.n; i++) { int k = map_get(&seen, leaders.v[i]); if (k >= 0) start[k] = 1; }
     for (int i = 0; i < n; i++) {
         X86Opcode op = ins[i].op;
-        int term = op == X86_RET || op == X86_JMP || op == X86_JCC || (i > 0 && cfg_is_exit(&ins[i - 1], &ins[i]));
+        int term = op == X86_RET || op == X86_HLT || op == X86_UD2 || op == X86_JMP || op == X86_JCC || (i > 0 && cfg_is_exit(&ins[i - 1], &ins[i]));
         if (term && i + 1 < n) start[i + 1] = 1;
         if (i > 0 && ins[i - 1].addr + (uint64_t)ins[i - 1].size != ins[i].addr) start[i] = 1;
     }
@@ -193,7 +193,8 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
         const X86Insn *last = &f->insns[bl->first + bl->n - 1];
         const X86Insn *pl = bl->n > 1 ? last - 1 : (bl->first > 0 ? last - 1 : NULL);
         bl->nsucc = 0;
-        if (last->op == X86_RET) continue;
+        if (last->op == X86_RET || last->op == X86_HLT || last->op == X86_UD2) continue;
+        if (last->op == X86_JMP && last->ops[0].kind != XO_REL) continue; /* indirect: unknown targets */
         if (pl && cfg_is_exit(pl, last)) { bl->exits = 1; continue; }
         if (last->op == X86_JMP || last->op == X86_JCC) {
             int t = cfg_find_block(f, last->ops[0].target);
@@ -225,10 +226,39 @@ void cfg_free(CfgProgram *p) {
     memset(p, 0, sizeof(*p));
 }
 
+
+static void seed_symbols(const RexElf *e, AddrList *calls) {
+    /* Best-effort: SHT_SYMTAB -> .strtab, SHT_DYNSYM -> .dynstr. */
+    for (int si = 0; si < e->nsh; si++) {
+        const RexShdr *s = &e->sh[si];
+        if (s->type != 2 && s->type != 11) continue; /* SYMTAB / DYNSYM */
+        if (s->size == 0 || s->size % 24) continue;   /* ELF64 Elf64_Sym = 24 */
+        const char *want = s->type == 11 ? ".dynstr" : ".strtab";
+        int str = -1;
+        for (int j = 0; j < e->nsh; j++)
+            if (e->sh[j].type == 3 && !strcmp(e->sh[j].name, want)) { str = j; break; }
+        if (str < 0) continue;
+        const RexShdr *st = &e->sh[str];
+        for (uint64_t off = 0; off + 24 <= s->size; off += 24) {
+            const unsigned char *sym = e->data + s->offset + off;
+            uint32_t name = (uint32_t)sym[0] | (uint32_t)sym[1]<<8 | (uint32_t)sym[2]<<16 | (uint32_t)sym[3]<<24;
+            unsigned char info = sym[4];
+            uint64_t val = 0; for (int k = 0; k < 8; k++) val |= (uint64_t)sym[8+k] << (8*k);
+            if (!val || name >= st->size) continue;
+            unsigned type = info & 0xf;
+            if (type != 2) continue; /* STT_FUNC */
+            size_t av = 0;
+            if (!rex_elf_code_at(e, val, &av) || av < 1) continue;
+            al_push(calls, val);
+        }
+    }
+}
+
 int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
     memset(p, 0, sizeof(*p));
     AddrList calls = {0};
     if (al_push(&calls, e->entry)) return fail(err, errlen, "out of memory");
+    seed_symbols(e, &calls);
     p->funcs = calloc(CFG_MAX_FUNCS, sizeof(CfgFunc));
     if (!p->funcs) { free(calls.v); return fail(err, errlen, "out of memory"); }
     for (int ci = 0; ci < calls.n; ci++) {
@@ -243,6 +273,40 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
         if (a == e->entry) {
             for (int i = 0; i < f->ninsns; i++)
                 if (f->insns[i].op == X86_CALL && f->insns[i].ops[0].kind == XO_REL) { p->main_addr = f->insns[i].ops[0].target; break; }
+        }
+    }
+    /* Name functions from symbols; set main_addr if main is present. */
+    for (int si = 0; si < e->nsh; si++) {
+        const RexShdr *sec = &e->sh[si];
+        if (sec->type != 2 && sec->type != 11) continue;
+        if (sec->size == 0 || sec->size % 24) continue;
+        const char *want = sec->type == 11 ? ".dynstr" : ".strtab";
+        int str = -1;
+        for (int j = 0; j < e->nsh; j++)
+            if (e->sh[j].type == 3 && !strcmp(e->sh[j].name, want)) { str = j; break; }
+        if (str < 0) continue;
+        const RexShdr *st = &e->sh[str];
+        for (uint64_t off = 0; off + 24 <= sec->size; off += 24) {
+            const unsigned char *sym = e->data + sec->offset + off;
+            uint32_t name = (uint32_t)sym[0] | (uint32_t)sym[1]<<8 | (uint32_t)sym[2]<<16 | (uint32_t)sym[3]<<24;
+            unsigned type = sym[4] & 0xf;
+            uint64_t val = 0; for (int k = 0; k < 8; k++) val |= (uint64_t)sym[8+k] << (8*k);
+            if (type != 2 || !val || name >= st->size) continue;
+            const char *nm = (const char *)(e->data + st->offset + name);
+            size_t maxlen = st->size - name;
+            /* Stop at NUL or @ (versioned symbols). */
+            char buf[64]; size_t k = 0;
+            while (k + 1 < sizeof(buf) && k < maxlen && nm[k] && nm[k] != '@') {
+                unsigned char c = (unsigned char)nm[k];
+                buf[k] = (c >= 32 && c < 127) ? (char)c : '_'; k++;
+            }
+            buf[k] = 0;
+            if (!k) continue;
+            if (!strcmp(buf, "main")) p->main_addr = val;
+            for (int fi = 0; fi < p->nfuncs; fi++)
+                if (p->funcs[fi].addr == val) {
+                    snprintf(p->funcs[fi].name, sizeof(p->funcs[fi].name), "%.*s", (int)sizeof(p->funcs[fi].name) - 1, buf);
+                }
         }
     }
     free(calls.v);

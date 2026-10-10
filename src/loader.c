@@ -56,9 +56,9 @@ static int pe_parse(const unsigned char *data, size_t len, RexElf *out, char *er
         else if (m == 0x20b) magic = "PE32+";
         else magic = "bad-optional-magic";
     }
-    snprintf(err, errlen, "PE/COFF (%s, %s) recognized; PE loading not implemented yet",
-             pe_machine(machine), magic);
-    return REX_BIN_ERR_PE_STUB;
+    return rex_errf(err, errlen, REX_E101_PE_STUB,
+                    "PE/COFF (%s, %s) recognized; PE loading not implemented yet",
+                    pe_machine(machine), magic);
 }
 
 /* ---- ELF wrapper (real implementation stays in elfread.c) ---- */
@@ -96,8 +96,8 @@ int rex_bin_parse(const unsigned char *data, size_t len, RexElf *out, char *err,
     if (!L) {
         char hx[40];
         hex_prefix(data, len, hx, sizeof(hx));
-        snprintf(err, errlen, "unrecognized binary format%s%s", hx[0] ? ": " : "", hx);
-        return REX_BIN_ERR_UNRECOGNIZED;
+        return rex_errf(err, errlen, REX_E100_UNRECOGNIZED,
+                        "unrecognized binary format%s%s", hx[0] ? ": " : "", hx);
     }
     return L->parse(data, len, out, err, errlen);
 }
@@ -105,7 +105,7 @@ int rex_bin_parse(const unsigned char *data, size_t len, RexElf *out, char *err,
 int rex_bin_open(const char *path, RexElf *out, char *err, size_t errlen) {
     memset(out, 0, sizeof(*out));
     FILE *f = fopen(path, "rb");
-    if (!f) { snprintf(err, errlen, "%s: %s", path, strerror(errno)); return 1; }
+    if (!f) return rex_errf(err, errlen, REX_E103_IO, "%s: %s", path, strerror(errno));
     size_t cap = 1 << 16, len = 0;
     unsigned char *buf = malloc(cap);
     if (!buf) { fclose(f); snprintf(err, errlen, "out of memory"); return 1; }

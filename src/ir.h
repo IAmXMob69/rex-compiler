@@ -42,6 +42,7 @@ typedef enum {
     IR_CMP,     /* flags = a - b */
     IR_TEST,    /* flags = a & b */
     IR_SETCC,   /* dst = cc ? 1 : 0 */
+    IR_CMOV,    /* dst = cc ? a : dst */
     IR_JMP,     /* goto a (block or addr) */
     IR_BR,      /* if cc goto a else goto b */
     IR_CALL,    /* call a (addr or reg) */
