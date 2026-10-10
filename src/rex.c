@@ -2349,6 +2349,7 @@ static void usage(void) {
         "  rex disasm --function F <elf> one function (start, main, fn_ADDR, ADDR)\n"
         "  rex ir [--function F] <elf>  lift to machine IR and print it\n"
         "  rex recompile <elf> -o out   lift to IR and generate a new ELF\n"
+        "  rex decompile <elf> -o out.rex  recover REX source from a binary\n"
         "  rex version\n",
         REX_VERSION);
     exit(2);
@@ -2434,6 +2435,7 @@ int rex_cmd_disasm(const char *path);
 int rex_cmd_disasm_func(const char *path, const char *fname);
 int rex_cmd_ir(const char *path, const char *fname);
 int rex_recompile(const char *in, const char *out, int debug);
+int rex_decompile(const char *in, const char *out, int verbose);
 
 int main(int argc, char **argv) {
     if (argc < 2) usage();
@@ -2445,6 +2447,17 @@ int main(int argc, char **argv) {
         if (argc >= 5 && strcmp(argv[2], "--function") == 0) return rex_cmd_ir(argv[4], argv[3]);
         if (argc < 3) usage();
         return rex_cmd_ir(argv[2], NULL);
+    }
+    if (strcmp(argv[1], "decompile") == 0) {
+        const char *in = NULL, *out = "out.rex";
+        int verbose = 0;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i], "--verbose")) verbose = 1;
+            else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
+            else in = argv[i];
+        }
+        if (!in) usage();
+        return rex_decompile(in, out, verbose);
     }
     if (strcmp(argv[1], "recompile") == 0) {
         const char *in = NULL, *out = "a.out";

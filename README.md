@@ -121,14 +121,62 @@ rex asm examples/functions.rex
 
 `rex run` builds the program, runs it, and deletes it. `rex build` keeps the program. `rex asm` only prints the assembly.
 
+`rex inspect` and `rex disasm` read an existing ELF. `rex recompile` lifts it through the machine IR and writes a new ELF. `rex decompile` writes a `.rex` file that often rebuilds for simple programs.
+
 ## Files
 
 - `src/rex.c` is the compiler
 - `src/elf.c` is the assembler and the ELF writer
+- `src/ir.c` / `src/ir.h` is the machine IR (architecture-independent)
+- `src/elfread.c` is the ELF64 loader (reads; never runs the input)
+- `src/x86_decode.c` is the x86-64 decoder
+- `src/cfg.c` builds the control-flow graph
+- `src/x86_lift.c` lifts x86-64 into the machine IR
+- `src/codegen.c` encodes the IR back to x86-64
+- `src/recompiler.c` writes a new ELF from the IR
+- `src/decompiler.c` recovers REX source from the IR
 - `src/rexrt.c` is the old helper. The ELF path does not use it
 - `examples/` has test programs
+- `tests/` has unit tests for the IR, ELF reader and decoder
 - `share/` has the XFCE launcher and the Mousepad color file
+
+## Inspect, disassemble, recompile, decompile
+
+```
+rex inspect program
+rex disasm program
+rex disasm --cfg program
+rex disasm --function main program
+rex ir program
+rex recompile program -o rebuilt
+rex decompile program -o recovered.rex
+```
+
+The path is always:
+
+```
+ELF → loader → x86 decoder → CFG → machine IR → native ELF
+                                         ↘ REX source
+```
+
+`rex recompile` keeps the original data segments at their old addresses and
+puts new code in a fresh segment. With `--poison` the old code bytes are
+filled with `int3`, so a matching run proves the new code is what executed.
+
+`rex decompile` targets REX-built binaries. Names are invented. Runtime
+helpers become `print` / `putc` / `alloc` / `free`. Loops, arrays, pointers,
+globals, switches and function pointers are only partly recovered — see
+Limits. Simple arithmetic, branches, calls and returns round-trip today.
 
 ## Limits
 
 No nested structs. A struct stays in the function that created it, unless you pass its address. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
+
+The recompiler and decompiler start from ELF64 x86-64 Linux executables
+(ET_EXEC). Relocatable objects, PIE, shared libraries, Windows PE, ARM and
+game binaries are out of scope for now. The decoder covers the instructions
+REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test,
+jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). Unsupported
+opcodes stop the lift with a clear error. Indirect jumps are refused.
+Function-pointer calls keep working after recompile because the original
+code stays mapped; the decompiler turns them into opaque calls.

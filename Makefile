@@ -6,13 +6,13 @@ CC     ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-function
 override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
 
-SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/codegen.c src/recompiler.c src/inspect.c
+SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/codegen.c src/recompiler.c src/decompiler.c src/inspect.c
 
 .PHONY: all install uninstall test unit clean
 
 all: rex
 
-rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h src/x86_lift.h src/codegen.h src/recompiler.h
+rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h src/x86_lift.h src/codegen.h src/recompiler.h src/decompiler.h
 	$(CC) $(CFLAGS) -o rex $(SRCS)
 	chmod +x rex
 
@@ -147,6 +147,15 @@ test: rex unit
 	! ./rex inspect Makefile 2>/tmp/rexin.err && grep -q 'bad magic' /tmp/rexin.err
 	./rex disasm --cfg /tmp/self2 | grep -q 'block'
 	./rex disasm --function main /tmp/stage | grep -q 'return'
+	./rex recompile --poison /tmp/stage -o /tmp/stage.re
+	/tmp/stage.re | cmp - /tmp/stage.out 2>/dev/null || /tmp/stage.re | cmp - examples/stage.out
+	./rex decompile /tmp/stage -o /tmp/stage.dec.rex
+	./rex run /tmp/stage.dec.rex | cmp - examples/stage.out
+	printf '%s\n' 'fn add(a,b){return a+b;}' 'fn main(){print(add(40,2));}' > /tmp/leaf.rex
+	./rex build /tmp/leaf.rex -o /tmp/leaf
+	./rex decompile /tmp/leaf -o /tmp/leaf.dec.rex
+	printf '42\n' > /tmp/leaf.exp
+	./rex run /tmp/leaf.dec.rex | cmp - /tmp/leaf.exp
 	@echo "tests passed"
 
 clean:
