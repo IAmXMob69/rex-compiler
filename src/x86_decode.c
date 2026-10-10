@@ -168,9 +168,25 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
         e = modrm(&r, &c, 8);
         if ((c.reg & 7) != 0) goto bad;
         set1(out, X86_POP, e);
-    } else if (b == 0x90) {
-        if (c.b) goto bad;  /* xchg r8, rax */
-        out->op = X86_NOP;
+    } else if (b == 0x63) {
+        /* movsxd r64, r/m32 (REX.W) or movsxd r32, r/m32 */
+        e = modrm(&r, &c, 4);
+        set2(out, X86_MOVSX, reg_op(&c, c.reg, v), e);
+    } else if (b == 0x86 || b == 0x87) {
+        int sz = b == 0x86 ? 1 : v;
+        e = modrm(&r, &c, sz);
+        set2(out, X86_XCHG, e, reg_op(&c, c.reg, sz));
+    } else if (b >= 0x90 && b <= 0x97) {
+        if (b == 0x90 && !c.b) { out->op = X86_NOP; }
+        else {
+            int r8 = (b & 7) | (c.b << 3);
+            set2(out, X86_XCHG, reg_op(&c, 0, v), reg_op(&c, r8, v));
+        }
+    } else if (b == 0x98) {
+        /* cwde (eax<-ax) or cdqe (rax<-eax) with REX.W */
+        int src_sz = c.w ? 4 : 2;
+        int dst_sz = c.w ? 8 : 4;
+        set2(out, X86_MOVSX, reg_op(&c, 0, dst_sz), reg_op(&c, 0, src_sz));
     } else if (b == 0x99) {
         out->op = X86_CQO; out->ops[0].size = v;
     } else if (b == 0xa8) {
@@ -299,7 +315,7 @@ static const char *names[X86_OP_COUNT] = {
     "and", "or", "xor", "shl", "shr", "sar",
     "cmp", "test", "inc", "dec", "neg", "not",
     "jmp", "j", "set", "call", "ret",
-    "nop", "cqo", "syscall", "endbr64", "leave", "hlt", "ud2", "cmov",
+    "nop", "cqo", "syscall", "endbr64", "leave", "hlt", "ud2", "cmov", "xchg",
 };
 static const char *ccs[16] = { "o","no","b","ae","e","ne","be","a","s","ns","p","np","l","ge","le","g" };
 
@@ -346,7 +362,15 @@ void x86_format(const X86Insn *in, char *buf, size_t n) {
     case X86_CMOVCC: snprintf(mn, sizeof(mn), "cmov%s", x86_cc_name(in->cc)); break;
     case X86_CQO: snprintf(mn, sizeof(mn), "%s", in->ops[0].size == 8 ? "cqo" : in->ops[0].size == 2 ? "cwtd" : "cltd"); break;
     case X86_MOVZX: case X86_MOVSX:
-        snprintf(mn, sizeof(mn), "%s%c%c", x86_op_name(in->op), suffix(in->ops[1].size), suffix(in->ops[0].size)); break;
+        if (in->op == X86_MOVSX && in->ops[1].size == 4 && in->ops[0].size == 8
+            && in->ops[0].kind == XO_REG && in->ops[1].kind == XO_REG
+            && in->ops[0].reg == 0 && in->ops[1].reg == 0)
+            snprintf(mn, sizeof(mn), "cltq");
+        else if (in->op == X86_MOVSX && in->ops[1].size == 4 && in->ops[0].size == 8)
+            snprintf(mn, sizeof(mn), "movslq");
+        else
+            snprintf(mn, sizeof(mn), "%s%c%c", x86_op_name(in->op), suffix(in->ops[1].size), suffix(in->ops[0].size));
+        break;
     default: {
         snprintf(mn, sizeof(mn), "%s", x86_op_name(in->op));
         /* Size suffix only when no register says it. */
@@ -362,6 +386,9 @@ void x86_format(const X86Insn *in, char *buf, size_t n) {
     }
     size_t k = (size_t)snprintf(buf, n, "%s", mn);
     int branch = in->op == X86_JMP || in->op == X86_CALL;
+    if (!strcmp(mn, "cltq") || !strcmp(mn, "cqo") || !strcmp(mn, "cltd") || !strcmp(mn, "cwtd")
+        || !strcmp(mn, "leave") || !strcmp(mn, "endbr64") || !strcmp(mn, "endbr32"))
+        return; /* no operands printed */
     for (int j = in->nops - 1, first = 1; j >= 0; j--, first = 0) {
         if (k >= n) return;
         k += (size_t)snprintf(buf + k, n - k, first ? " " : ", ");

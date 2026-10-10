@@ -1,5 +1,6 @@
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "x86_lift.h"
 #include "rex_err.h"
@@ -125,6 +126,28 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         zext32(l, d);
         break;
     }
+    case X86_XCHG: {
+        if (d.kind == IR_O_REG && s.kind == IR_O_REG) {
+            int scratch = 11;
+            if (d.reg == 11 || s.reg == 11) scratch = 10;
+            if (d.reg == scratch || s.reg == scratch) { lfail(l, "xchg needs a free scratch"); break; }
+            wrote(l, d); wrote(l, s);
+            i = emit(l, IR_MOV); i->dst = ir_reg(scratch, d.width); i->a = d;
+            i = emit(l, IR_MOV); i->dst = d; i->a = s; if (d.width == 4) zext32(l, d);
+            i = emit(l, IR_MOV); i->dst = s; i->a = ir_reg(scratch, s.width); if (s.width == 4) zext32(l, s);
+        } else if (d.kind == IR_O_MEM && s.kind == IR_O_REG) {
+            wrote(l, s);
+            i = emit(l, IR_MOV); i->dst = ir_reg(11, s.width); i->a = s;
+            i = emit(l, IR_LOAD); i->dst = s; i->a = d; if (s.width == 4) zext32(l, s);
+            i = emit(l, IR_STORE); i->dst = d; i->a = ir_reg(11, s.width);
+        } else if (d.kind == IR_O_REG && s.kind == IR_O_MEM) {
+            wrote(l, d);
+            i = emit(l, IR_MOV); i->dst = ir_reg(11, d.width); i->a = d;
+            i = emit(l, IR_LOAD); i->dst = d; i->a = s; if (d.width == 4) zext32(l, d);
+            i = emit(l, IR_STORE); i->dst = s; i->a = ir_reg(11, d.width);
+        } else { lfail(l, "xchg form not supported"); }
+        break;
+    }
     case X86_LEAVE:
         wrote(l, ir_reg(4, 8)); wrote(l, ir_reg(5, 8));
         i = emit(l, IR_MOV); i->dst = ir_reg(4, 8); i->a = ir_reg(5, 8);
@@ -150,11 +173,20 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         break;
     case X86_ADD: case X86_SUB: case X86_AND: case X86_OR: case X86_XOR:
     case X86_SHL: case X86_SHR: case X86_SAR:
+        /* If a flag-user follows in this block, materialize cmp before add/sub
+         * (same flags as the alu) so ja/jg after sub $imm,reg works. */
+        if ((in->op == X86_ADD || in->op == X86_SUB) && !last_in_block) {
+            const X86Insn *nx = l->in + 1;
+            if (nx->op == X86_JCC || nx->op == X86_SETCC || nx->op == X86_CMOVCC) {
+                i = emit(l, IR_CMP); i->a = d; i->b = s;
+                l->flags = FL_CMP;
+            }
+        }
         wrote(l, d);
         i = emit(l, alu_op(in->op));
         i->dst = d; i->a = d; i->b = s;
         if (in->op >= X86_SHL && in->op <= X86_SAR && !(s.kind == IR_O_IMM && (s.imm & 63) != 0)) l->flags = FL_NONE;
-        else { l->flags = FL_RESULT; l->res = d; }
+        else if (l->flags != FL_CMP) { l->flags = FL_RESULT; l->res = d; }
         zext32(l, d);
         break;
     case X86_INC: case X86_DEC:
@@ -295,20 +327,40 @@ IrModule *x86_lift(const CfgProgram *p, char *err, size_t errlen) {
         if (!f) { snprintf(err, errlen, "out of memory"); ir_module_free(m); return NULL; }
         for (int b = 0; b < cf->nblocks; b++)
             if (ir_block_add(f, cf->blocks[b].start) != b) { snprintf(err, errlen, "out of memory"); ir_module_free(m); return NULL; }
+        int *out_fl = calloc((size_t)cf->nblocks, sizeof(int));
+        if (!out_fl) { snprintf(err, errlen, "out of memory"); ir_module_free(m); return NULL; }
         L l = { f, 0, cf, NULL, FL_NONE, {0}, err, errlen, 0, 0 };
         for (int b = 0; b < cf->nblocks; b++) {
             const CfgBlock *bl = &cf->blocks[b];
             l.block = b;
             l.bfirst = bl->first;
             l.flags = FL_NONE;
+            /* Inherit cmp flags from a unique fall-through predecessor that ended in jcc.
+             * (cmp; je T; jg U  — the jg block still sees the cmp flags.) */
+            int pred = -1, npred = 0;
+            for (int p = 0; p < cf->nblocks; p++) {
+                const CfgBlock *pb = &cf->blocks[p];
+                for (int s = 0; s < pb->nsucc; s++)
+                    if (pb->succ[s] == b) { pred = p; npred++; }
+            }
+            if (npred == 1 && out_fl[pred] == FL_CMP) {
+                const CfgBlock *pb = &cf->blocks[pred];
+                if (pb->n > 0) {
+                    const X86Insn *last = &cf->insns[pb->first + pb->n - 1];
+                    if (last->op == X86_JCC && pb->nsucc == 2 && pb->succ[1] == b)
+                        l.flags = FL_CMP;
+                }
+            }
             for (int k = 0; k < bl->n; k++) {
                 int idx = bl->first + k;
                 l.in = &cf->insns[idx];
                 const X86Insn *prev = idx > 0 && cf->insns[idx - 1].addr + (uint64_t)cf->insns[idx - 1].size == l.in->addr ? &cf->insns[idx - 1] : NULL;
                 lift_insn(&l, prev, k == bl->n - 1, b);
-                if (l.bad) { ir_module_free(m); return NULL; }
+                if (l.bad) { free(out_fl); ir_module_free(m); return NULL; }
             }
+            out_fl[b] = l.flags;
         }
+        free(out_fl);
         if (ir_link(f, err, errlen)) { ir_module_free(m); return NULL; }
     }
     return m;

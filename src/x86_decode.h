@@ -35,6 +35,7 @@ typedef enum {
     X86_LEAVE,          /* mov %rbp, %rsp; pop %rbp */
     X86_HLT, X86_UD2,   /* terminators */
     X86_CMOVCC,         /* cc in .cc; dst, src */
+    X86_XCHG,           /* exchange dst, src */
     X86_OP_COUNT
 } X86Opcode;
 

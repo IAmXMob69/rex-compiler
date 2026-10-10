@@ -346,6 +346,19 @@ int main(void) {
     g_cases++; if (x86_decode(add64,3,0x1000,&xi)<=0||xi.op!=X86_ADD) g_fail++; else g_ok++;
     unsigned char sar64[]={0x48,0xd3,0xf8};
     g_cases++; if (x86_decode(sar64,3,0x1000,&xi)<=0||xi.op!=X86_SAR) g_fail++; else g_ok++;
+    {
+        unsigned char cdqe[] = {0x48,0x98};
+        unsigned char movsxd[] = {0x48,0x63,0xd0};
+        unsigned char xchg[] = {0x87,0xd0};
+        g_cases++; if (x86_decode(cdqe,2,0x1000,&xi)<=0||xi.op!=X86_MOVSX||xi.ops[0].size!=8||xi.ops[1].size!=4) g_fail++; else g_ok++;
+        g_cases++; if (x86_decode(movsxd,3,0x1000,&xi)<=0||xi.op!=X86_MOVSX||xi.ops[0].reg!=2) g_fail++; else g_ok++;
+        g_cases++; if (x86_decode(xchg,2,0x1000,&xi)<=0||xi.op!=X86_XCHG) g_fail++; else g_ok++;
+        /* host: CDQE sign-extends eax into rax */
+        int32_t neg = -7;
+        int64_t ext;
+        __asm__ volatile("mov %1, %%eax; cltq; mov %%rax, %0" : "=r"(ext) : "r"(neg) : "rax");
+        g_cases++; if (ext != (int64_t)neg) g_fail++; else g_ok++;
+    }
     printf("cpu diff: %d ok, %d fail, %d cases\n", g_ok, g_fail, g_cases);
     return g_fail?1:0;
 }

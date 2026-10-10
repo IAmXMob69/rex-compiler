@@ -30,6 +30,11 @@ static const Case cases[] = {
     { "0fb6c0", "movzbl %al, %eax" },
     { "0fb60408", "movzbl (%rax,%rcx,1), %eax" },
     { "480fbf07", "movswq (%rdi), %rax" },
+    { "4898", "cltq" },
+    { "87d0", "xchg %edx, %eax" },
+    { "4891", "xchg %rcx, %rax" },
+    { "4863d0", "movslq %eax, %rdx" },
+    { "4863c0", "cltq" },
     /* push / pop */
     { "55", "push %rbp" },
     { "4150", "push %r8" },
