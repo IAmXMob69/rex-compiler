@@ -1,3 +1,5 @@
 rex
 *.o
 a.out
+# backstop: make test writes in.rex under /tmp/rex-test
+in.rex

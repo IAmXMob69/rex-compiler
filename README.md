@@ -20,12 +20,11 @@ Everyday names (shortcuts):
 | `rex build file.rex` | make a binary (`-o` optional, default `a.out`) |
 | `rex look elf` | peek at ELF headers (`inspect`) |
 | `rex show elf` | disassemble (`disasm`) |
-| `rex rebuild elf` | recompile from IR (`recompile`) |
-| `rex tosource elf` / `rex undo elf` | recover `.rex` (`decompile`) |
-| `rex help` | plain help |
+| `rex rebuild elf` | recompile from IR (`recompile`, `-o` optional, default `a.out`) |
+| `rex tosource elf` / `rex undo elf` | recover `.rex` (`decompile`, `-o` optional, default `out.rex`) |
+| `rex help` | plain help (also `-h`, `--help`) |
 
-All older command names still work.
-
+All older command names still work. An unknown command prints `rex: unknown command 'X' (try rex help)` and exits 2.
 
 ## Features
 
@@ -140,7 +139,7 @@ make test
 sudo make install
 ```
 
-That puts `rex` in `/usr/local/bin`. `make test` runs the unit tests (IR, ELF reader, decoder), every example, the `rexcomp` fixed point, and the recompile/decompile round trips.
+That puts `rex` in `/usr/local/bin`. `make test` runs the unit tests (IR, ELF reader, decoder, differential CPU), every example, the `rexcomp` fixed point, and the recompile/decompile round trips.
 
 If you want it in `/usr` instead:
 
@@ -215,7 +214,7 @@ fn main() {
 
 `rex recompile` keeps the original data segments at their old addresses and puts new code in a fresh segment. With `--poison` the old code bytes are filled with `int3`, so a matching run proves the new code is what executed.
 
-`rex decompile` targets REX-built binaries. Names are invented. Runtime helpers are recognized by their syscalls and become `print` / `putc` / `alloc` / `free`. Simple arithmetic, branches, calls and returns round-trip today.
+`rex decompile` targets REX-built binaries. Names are invented. Runtime helpers are recognized by shape and become `print`, `putc`, `alloc`, `free`, `exec`, `read`, `len`, or `strcmp` (printed as `a == b`). Simple arithmetic, branches, calls and returns round-trip today.
 
 ## Limits
 
@@ -223,7 +222,7 @@ Language: No nested structs. A struct stays in the function that created it, unl
 
 Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. Windows PE, ARM and game binaries are out of scope.
 
-Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Indirect jumps are refused.
+Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). Direct calls start functions; a rip-relative `lea`/`mov` also does, but only when its target starts with `push rbp` (0x55) or `endbr64`. The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Indirect jumps are refused.
 
 Recompile: no pc-relative `lea`, no 8/16-bit shifts. Function-pointer calls keep working because the original code stays mapped.
 
@@ -242,9 +241,8 @@ Decompile: names are invented. A call through a register prints the pointer expr
 - `src/codegen.c` encodes the IR back to x86-64
 - `src/recompiler.c` writes a new ELF from the IR
 - `src/decompiler.c` recovers REX source from the IR
-- `src/rexrt.c` is the old libc runtime. Nothing links it; `make install` still copies it
 - `examples/` has test programs and expected output
-- `tests/` has unit tests for the IR, ELF reader and decoder
+- `tests/` has unit tests for the IR, ELF reader and decoder, and differential CPU tests (`test_cpu_diff.c`)
 - `share/` has the XFCE launcher and the Mousepad color file
 - `docs/compiler.md` is the architecture audit
 

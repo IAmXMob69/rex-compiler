@@ -16,6 +16,14 @@ binary      ELF64 → rex_elf_open → x86 decoder → cfg_build → x86_lift �
 
 `rex inspect` and `rex disasm` (`src/inspect.c`) stop after the loader and the CFG.
 
+## CLI (`main` in `src/rex.c`)
+
+`alias_cmd` maps `look` → `inspect`, `show` → `disasm`, `rebuild` → `recompile`, `tosource` / `undo` → `decompile`, and `help` / `-h` / `--help` → `print_help`. `-o` is optional and may appear anywhere: `build` and `recompile` default to `a.out`, `decompile` to `out.rex`. `build` with no file says so and exits 2; `recompile`/`decompile` with no input print help and exit 2. An unknown command prints `rex: unknown command 'X' (try rex help)` and exits 2.
+
+## Tests
+
+`make unit` builds four C tests: `tests/test_ir.c`, `tests/test_elf.c`, `tests/test_x86.c`, and `tests/test_cpu_diff.c`. The differential test compares a C model of the IR ops (`eval_add`, `eval_sub`, `eval_logic`, `eval_mul`, `eval_shl`/`shr`/`sar`) against the host CPU through inline asm, for results and flags, at widths 1, 2, 4 and 8 with edge and pseudo-random values. Without x86-64 inline asm it prints `cpu diff: SKIP`. `make test` then runs every example, the `rexcomp` fixed point (its `in.rex` lives in `/tmp/rex-test`, removed at the end), and the recompile/decompile round trips.
+
 ## Front end (`src/rex.c`)
 
 - Lexer: `lex_next` over a `Lexer` with line and column. Tokens are `TokKind`.
@@ -37,7 +45,7 @@ Output: one ELF64 header, one `PT_LOAD` with flags RWX (7) at 0x400000, entry at
 
 The code that runs is the `runtime` string in `src/elf.c`: `rex_start`, `rex_print_int`, `rex_print_str`, `rex_putc`, `rex_read_int`, `rex_exec`, `rex_alloc`, `rex_free`, `rex_load`, `rex_fail`, `rex_strlen`, `rex_strcmp` and helpers. All of it is raw syscalls: read 0, write 1, open 2, mmap 9, munmap 11, fork 57, execve 59, exit 60, wait4 61.
 
-`src/rexrt.c` is a libc version of a few of the same helpers. Nothing links it. `make install` still copies it to `share/rex/rexrt.c`. `rt_path` (which reads `REX_RUNTIME`) is never called, so the `REX_RUNTIME=` prefix in `make test` has no effect. The two runtimes are not generated from one source and do drift: `rexrt.c` has no `alloc`, `free`, `load`, `putc` or string helpers.
+This is the only runtime. The old libc `src/rexrt.c`, the dead `rt_path` lookup and `REX_RUNTIME` are gone: a C runtime cannot replace the embedded one without a C compiler and libc, which REX output does not use, so there is nothing for it to drift from.
 
 ## ELF loader (`src/elfread.c`)
 
@@ -47,7 +55,7 @@ The code that runs is the `runtime` string in `src/elf.c`: `rex_start`, `rex_pri
 
 The decoder turns bytes into `X86Insn` with destination-first operands. It covers what REX emits: mov, movzx/movsx, lea, push/pop, add/sub/and/or/xor, shl/shr/sar, inc/dec, neg/not, imul, idiv/div, cqo, cmp/test, jmp/jcc, call, ret, setcc, syscall, nop.
 
-`cfg_build` does recursive descent from the entry point. No linear sweep. Direct calls start new functions; jumps stay inside the function. Indirect jumps are refused. `cfg_is_exit` marks blocks that end in an exit syscall. `main_addr` is the first direct call from the entry.
+`cfg_build` does recursive descent from the entry point. No linear sweep. Direct calls start new functions; jumps stay inside the function. A rip-relative `lea` or `mov` also starts a function (function pointers), but only when the target's first byte is `push rbp` (0x55) or it begins `f3 0f` (`endbr64`). Indirect jumps are refused. `cfg_is_exit` marks blocks that end in an exit syscall. `main_addr` is the first direct call from the entry.
 
 ## Machine IR (`src/ir.h`, `src/ir.c`)
 
@@ -84,7 +92,9 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 `rex_decompile` lifts, then `classify`:
 
 - `start` is skipped. The function at `main_addr` is `main`. Others are `f<N>`.
-- A function with a syscall is a runtime helper, guessed by shape: div plus 10 → `print`, mmap → `alloc`, munmap → `free`, a byte store → `putc`, else `print`.
+- A function with a syscall is a runtime helper, guessed by shape in this order: fork/execve (57/59) → `exec`, read syscall plus a digit compare → `read`, div plus 10 → `print`, mmap → `alloc`, munmap → `free`, a byte store → `putc`, else `print`.
+- A syscall-free leaf with no calls or multiplies is `strcmp` (two or more byte loads, three or more blocks) or `len` (byte load, compare with 0, add 1, at most one argument). A `strcmp` call is printed as `a == b`.
+- Argument-register stores are not hidden as prologue (`is_prolog`), so parameter spills stay visible.
 - Parameters come from early stores of argument registers to `[rbp-…]`: `a`, `b`, `c`, …. Other stack slots become `t<N>`.
 
 `step` evaluates IR symbolically into expressions; `walk2` rebuilds `if`/`else` (via `find_join`) and `while` (via `is_loop_header`). Prologue and epilogue are dropped. Calls to unrecognized helpers such as `rex_fail` are dropped. A call through a register prints the pointer expression called with two arguments. Output starts with two `//` header lines. `--verbose` prints each function's kind, argument count and builtin.
@@ -102,8 +112,8 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 | Output | x86-64 Linux ELF, one RWX load | objects, relocations, ARM64, PE, Mach-O |
 | Binary input | ELF64 x86-64 `ET_EXEC` | PIE, shared objects, other arches |
 | Back half | inspect, disasm, CFG, IR, recompile, decompile | optimization, full decompile of loops/arrays/switch |
-| Tools | `run build check asm elf inspect disasm ir recompile decompile version`, Mousepad spec | fmt, lint, lsp, package manager |
-| Tests | example outputs, negative diagnostics, `rexcomp` fixed point, unit tests (IR, ELF reader, decoder), recompile and decompile round trips | fuzz, diagnostic snapshots |
+| Tools | `run build check asm elf inspect disasm ir recompile decompile version help`, aliases `look show rebuild tosource undo`, Mousepad spec | fmt, lint, lsp, package manager |
+| Tests | example outputs, negative diagnostics, `rexcomp` fixed point, unit tests (IR, ELF reader, decoder), differential CPU tests, recompile and decompile round trips | fuzz, diagnostic snapshots |
 
 ## Global state
 
@@ -121,7 +131,5 @@ Lexer and parser state is local. The rest of `src/rex.c` is file-scope: `g_out`,
 
 ## Known issues
 
-- `make` warns: `src/rex.c:1907: suggest parentheses around '&&' within '||' [-Wparentheses]`. The condition is long and hard-coded around names such as `names`, `lens`, `offs`, `firsts`. Behaviour is as written; the intent should be bracketed explicitly.
-- `rt_path` and `REX_RUNTIME` are dead (hidden by `-Wno-unused-function`). `src/rexrt.c` is installed but unused.
 - Nodes store a line, not a column. The caret uses a token column only when the caller passes one (`col_of`).
 - Self-host is not done. `examples/rexcomp.rex` reaches a fixed point for its own subset only. It is not a self-host of `src/rex.c`.
