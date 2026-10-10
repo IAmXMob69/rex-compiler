@@ -1,6 +1,6 @@
 # REX
 
-REX is a small compiler and a reverse-engineering / recovery toolchain for native binaries. The long-term aim is Ghidra / Binary Ninja class work: load a binary, recover control flow, lift to a machine IR, recompile and decompile. It is not there yet. Today the only working load path is ELF64 x86-64 non-PIE (`ET_EXEC`), and the high-quality decompile path is tuned for binaries REX itself emitted. PE is recognized and refused with a clear message. There is no claim of parity with those tools.
+REX is a small compiler and a reverse-engineering / recovery toolchain for native binaries. The long-term aim is Ghidra / Binary Ninja class work: load a binary, recover control flow, lift to a machine IR, recompile and decompile. It is not there yet. Today the working load paths are ELF64 x86-64 non-PIE (`ET_EXEC`) and simple static PE32+ x86-64 (no imports/relocs/TLS/.NET). The high-quality decompile path is tuned for binaries REX itself emitted. There is no claim of parity with those tools.
 
 The compile path still turns a `.rex` file into an ELF that talks to the kernel directly, with no gcc and no assembler.
 
@@ -25,7 +25,9 @@ Start here. These are the everyday names:
 | `rex rebuild file` | rebuild from machine IR (`-o` optional) |
 | `rex tosource file` / `rex undo file` | turn a binary back into `.rex` |
 | `rex compare file` | rebuild and check the new binary matches |
+| `rex compare --ir file` | same, and also compare the machine IR |
 | `rex match file` | tosource, rebuild that source, check it matches |
+| `rex match --ir file` | same, and also compare the machine IR |
 | `rex explain E101` | plain English for an error code |
 | `rex help` | short help (also `-h`, `--help`) |
 
@@ -37,7 +39,7 @@ Longer names still work: `inspect`, `disasm`, `recompile`, `decompile`, `ir`, `c
 
 - Compiler: `.rex` → AST → AT&T text → built-in assembler → ELF64. No gcc, no `as`, no libc in the output.
 - Checks: use before `let`, duplicate names, call arity, simple types (`rex check`). Errors carry a caret; several are reported per run.
-- Loader registry: `src/loader.c` picks a format by magic. ELF64 is fully loaded; PE/COFF is recognized (MZ + PE signature, machine, PE32/PE32+) and refused with a distinct exit code. Unknown formats report the first bytes in hex.
+- Loader registry: `src/loader.c` picks a format by magic. ELF64 is fully loaded; PE32+ x86-64 static images load sections for `look`/`show`/`ir` (no imports/relocs/TLS/.NET). Other PE shapes get a clear `E1xx`. Unknown formats report the first bytes in hex.
 - ELF64 loader: reads headers and segments. Never runs the input.
 - x86-64 decoder and disassembler, with a control-flow graph per function.
 - Machine IR: architecture-independent, printed by `rex ir`.
@@ -230,7 +232,7 @@ fn main() {
 
 Language: No nested structs. A struct stays in the function that created it, unless you pass its address. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
 
-Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. PE/COFF (x86-64, i386, arm64; PE32/PE32+) is recognized and exits with code 3 and a clear message; loading is not implemented. Other formats exit with code 2 and `unrecognized binary format: <hex>`. Function discovery still prefers REX-shaped prologues (`push rbp` / `endbr64`) when seeding from rip-relative lea/mov.
+Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only; plus simple static PE32+ x86-64 for `look`/`show`/`ir`. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. Other PE shapes (i386/ARM, PE32, imports, relocs, TLS, .NET, packed) get plain-English `E1xx` refusals. `rebuild` of PE is `E502`. Other formats exit with code 2 and `unrecognized binary format: <hex>`. Function discovery still prefers REX-shaped prologues (`push rbp` / `endbr64`) when seeding from rip-relative lea/mov.
 
 Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). Direct calls start functions; a rip-relative `lea`/`mov` also does, but only when its target starts with `push rbp` (0x55) or `endbr64`. The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Indirect jumps are refused.
 
@@ -238,9 +240,24 @@ Recompile: no pc-relative `lea`, no 8/16-bit shifts. Function-pointer calls keep
 
 Decompile: names are invented. A call through a register prints the pointer expression with two arguments. Loops, arrays, pointers, globals and switches are only partly recovered; nested structs, switch and most pointer arithmetic stay opaque. Arbitrary binaries may be refused or give a stub that does not round-trip.
 
+## REX vs Ghidra / Binary Ninja
+
+REX is smaller and stricter. It is not a replacement for those tools.
+
+Where REX is stronger today:
+- Built-in round-trip checks (`compare` / `match`, optional `--ir`)
+- Every refusal is a plain sentence plus a stable `E` code (`explain E101`)
+- A short everyday CLI (`look`, `show`, `rebuild`, `tosource`, …)
+- A working compile path for its own language that matches the recovery tools
+
+Where it is not:
+- Formats and ISAs (ELF x86-64 and simple static PE32+ only; no ARM, no Mach-O yet)
+- No GUI, no database, no scripting API
+- Types and structure recovery are thin; large/packed/import-heavy binaries are refused on purpose
+
 ## Roadmap
 
-Done: ELF64 loader behind a registry, PE recognition stub, numbered failure codes (E1xx–E6xx), machine IR, x86 lift including `cmovcc`/`leave`/`endbr`/`hlt`, recompile and decompile for REX-shaped binaries, `--verify` on recompile/decompile, CFG recursive descent from entry + call targets + ELF symbols, indirect jumps end a block instead of aborting the whole CFG.
+Done: ELF64 loader behind a registry, PE32+ x86-64 section load (static, no imports/relocs), numbered failure codes (E1xx–E6xx), machine IR, x86 lift including `cmovcc`/`leave`/`endbr`/`hlt`, recompile and decompile for REX-shaped binaries, `--verify` on recompile/decompile, CFG recursive descent from entry + call targets + ELF symbols, indirect jumps end a block instead of aborting the whole CFG.
 
 Next (no schedule):
 

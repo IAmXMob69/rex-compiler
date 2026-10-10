@@ -44,6 +44,7 @@ unit:
 	$(CC) $(CFLAGS) -o /tmp/rex_test_elf tests/test_elf.c src/elfread.c && /tmp/rex_test_elf
 	$(CC) $(CFLAGS) -o /tmp/rex_test_loader tests/test_loader.c src/loader.c src/elfread.c && /tmp/rex_test_loader
 	$(CC) $(CFLAGS) -o /tmp/rex_test_err tests/test_err.c src/loader.c src/elfread.c && /tmp/rex_test_err
+	$(CC) $(CFLAGS) -o /tmp/rex_test_pe tests/test_pe.c src/loader.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/ir.c && /tmp/rex_test_pe
 	$(CC) $(CFLAGS) -o /tmp/rex_test_x86 tests/test_x86.c src/x86_decode.c && /tmp/rex_test_x86
 	$(CC) $(CFLAGS) -o /tmp/rex_test_cpu tests/test_cpu_diff.c src/ir.c src/x86_decode.c && /tmp/rex_test_cpu
 
@@ -157,6 +158,14 @@ test: rex unit
 	./rex build examples/arithmetic.rex -o /tmp/arith
 	./rex recompile --verify --poison /tmp/arith -o /tmp/arith.re
 	./rex decompile --verify /tmp/arith -o /tmp/arith.dec.rex
+	./rex compare --ir --poison /tmp/arith -o /tmp/arith.re3
+	./rex build examples/functions.rex -o /tmp/fun
+	./rex compare --ir --poison /tmp/fun -o /tmp/fun.re
+	./rex match --ir /tmp/fun -o /tmp/fun.dec.rex
+	python3 -c "import struct;img=bytearray(0x400);img[0:2]=b'MZ';struct.pack_into('<I',img,0x3c,0x80);img[0x80:0x84]=b'PE\0\0';struct.pack_into('<H',img,0x84,0x8664);struct.pack_into('<H',img,0x86,1);struct.pack_into('<H',img,0x94,232);o=0x98;struct.pack_into('<H',img,o,0x20b);struct.pack_into('<I',img,o+16,0x1000);struct.pack_into('<Q',img,o+24,0x140000000);struct.pack_into('<I',img,o+32,0x1000);struct.pack_into('<I',img,o+36,0x200);struct.pack_into('<H',img,o+48,6);struct.pack_into('<I',img,o+56,0x2000);struct.pack_into('<I',img,o+60,0x200);struct.pack_into('<H',img,o+68,3);struct.pack_into('<I',img,o+108,15);s=0x80+4+20+232;img[s:s+8]=b'.text\0\0\0';struct.pack_into('<I',img,s+8,0x1000);struct.pack_into('<I',img,s+12,0x1000);struct.pack_into('<I',img,s+16,0x200);struct.pack_into('<I',img,s+20,0x200);struct.pack_into('<I',img,s+36,0x60000020);img[0x200:0x208]=bytes([0x48,0xc7,0xc0,0x2a,0,0,0,0xc3]);open('/tmp/rex_tiny.pe','wb').write(img)"
+	./rex look /tmp/rex_tiny.pe | grep -q PE32+
+	./rex show /tmp/rex_tiny.pe | grep -q 'mov'
+	! ./rex rebuild /tmp/rex_tiny.pe -o /tmp/rex_tiny.out 2>/tmp/rex_pe_rb.err; grep -q E502 /tmp/rex_pe_rb.err
 	./rex decompile /tmp/stage -o /tmp/stage.dec.rex
 	./rex run /tmp/stage.dec.rex | cmp - examples/stage.out
 	printf '%s\n' 'fn add(a,b){return a+b;}' 'fn main(){print(add(40,2));}' > /tmp/leaf.rex

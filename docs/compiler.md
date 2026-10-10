@@ -2,6 +2,12 @@
 
 Audit of this tree. Version: 0.17.0 (`REX_VERSION` in `src/rex.c`). Every claim below is checked against the source. Direction: a general-purpose reverse-engineering / recovery tool (load → CFG → machine IR → recompile / decompile), with the REX language compile path kept working. It is not a claim of parity with Ghidra, Binary Ninja, GCC, Clang, Rust, Go or MSVC.
 
+### REX vs Ghidra / Binary Ninja
+
+Stronger here: round-trip `compare`/`match` (optional `--ir`), plain-English refusals with stable `E` codes, a short everyday CLI, and a compile path that matches the recovery tools.
+
+Weaker here: format/ISA breadth, no GUI or scripting, thin types, and deliberate refusals for packed/import-heavy/PIE binaries.
+
 ## Two pipelines
 
 ```
@@ -26,8 +32,8 @@ Everyday names are the primary surface (`print_help`). `alias_cmd` maps:
 | `show` | `disasm` |
 | `rebuild` | `recompile` |
 | `tosource` / `undo` | `decompile` |
-| `compare` | recompile + run-both check |
-| `match` | decompile + compile + run-both check |
+| `compare` | recompile + run-both check (`--ir` also diffs normalized main IR) |
+| `match` | decompile + compile + run-both check (`--ir` also diffs IR) |
 | `explain` | look up an `E` code |
 | `help` / `-h` / `--help` | `print_help` |
 
@@ -67,7 +73,7 @@ This is the only runtime. The old libc `src/rexrt.c`, the dead `rt_path` lookup 
 | Name | Probe | Behavior |
 | --- | --- | --- |
 | `elf64` | `\x7fELF` | Full parse via `rex_elf_parse`. Same acceptance and refusals as before. |
-| `pe` | `MZ` at 0 and `PE\0\0` at `e_lfanew` | Reads the COFF machine (0x8664 / 0x14c / 0xaa64 / …) and optional-header magic (PE32 0x10b, PE32+ 0x20b). Returns `REX_BIN_ERR_PE_STUB` (exit 3) with `PE/COFF (<machine>, <magic>) recognized; PE loading not implemented yet`. No image is produced. |
+| `pe` | `MZ` at 0 and `PE\0\0` at `e_lfanew` | PE32+ x86-64 static images: section table → synthetic `PT_LOAD`, entry = ImageBase+EntryRVA, `.text` via `code_at`. Refuses i386/ARM (`E104`), PE32 (`E105`), imports (`E106`), relocs (`E107`), TLS (`E108`), .NET (`E109`), packed/no-X (`E110`). Rebuild of PE is `E502`. |
 
 Anything else returns `REX_BIN_ERR_UNRECOGNIZED` (exit 2) with `unrecognized binary format: <up to 8 bytes as hex>`. Callers (`inspect`, `disasm`, `ir`, `recompile`, `decompile`) go through the registry and propagate those exit codes.
 
@@ -79,9 +85,16 @@ Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex
 | Code | Area | Meaning |
 | --- | --- | --- |
 | E100 | loader | unrecognized binary format (first bytes in hex) |
-| E101 | loader | PE/COFF recognized; loading not implemented |
+| E101 | loader | PE feature not supported (legacy / catch-all) |
 | E102 | loader | ELF refused (class, endian, type, machine, …) |
 | E103 | loader | open/read failure |
+| E104 | loader | PE not x86-64 |
+| E105 | loader | PE not PE32+ |
+| E106 | loader | PE imports present |
+| E107 | loader | PE relocations present |
+| E108 | loader | PE TLS |
+| E109 | loader | PE .NET / CLR |
+| E110 | loader | PE packed / no executable section |
 | E200 | decode | unsupported or invalid opcode at address |
 | E300 | lift | cannot model instruction exactly |
 | E302 | lift | idiv / div shape |
@@ -90,11 +103,12 @@ Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex
 | E402 | CFG | irreducible control flow (reserved) |
 | E403 | CFG | address outside executable code |
 | E500 | recompile | encode / layout failure |
-| E501 | recompile | `--verify` mismatch |
+| E501 | recompile | `--verify` / `--ir` mismatch |
+| E502 | recompile | PE rebuild not supported |
 | E600 | decompile | recovery failure |
 | E601 | decompile | `--verify` mismatch |
 
-No silent partial output: a failure returns the code and prints the message. `--verify` on `recompile` / `decompile` runs both sides with no args and compares exit status plus combined stdout/stderr.
+No silent partial output: a failure returns the code and prints the message. `--verify` on `recompile` / `decompile` runs both sides with no args and compares exit status plus combined stdout/stderr. `compare --ir` / `match --ir` also lift both sides and compare a normalized dump of `main` (identity `mov`, call return addresses, and rip displacements are stripped).
 
 ## ELF loader (`src/elfread.c`)
 
