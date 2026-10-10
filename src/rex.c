@@ -2343,6 +2343,8 @@ static void usage(void) {
         "  rex check <file.rex>         parse and type-check only\n"
         "  rex asm <file.rex>           write assembly to stdout\n"
         "  rex elf <file.s> -o bin    assemble emitted assembly\n"
+        "  rex inspect <elf>            show ELF64 headers and segments\n"
+        "  rex disasm <elf>             disassemble executable segments\n"
         "  rex version\n",
         REX_VERSION);
     exit(2);
@@ -2423,8 +2425,19 @@ static int compile_to(const char *srcpath, const char *outbin) {
     return 0;
 }
 
+int rex_cmd_inspect(const char *path);
+int rex_cmd_disasm(const char *path);
+
 int main(int argc, char **argv) {
     if (argc < 2) usage();
+    if (strcmp(argv[1], "inspect") == 0) {
+        if (argc < 3) usage();
+        return rex_cmd_inspect(argv[2]);
+    }
+    if (strcmp(argv[1], "disasm") == 0) {
+        if (argc < 3) usage();
+        return rex_cmd_disasm(argv[2]);
+    }
     if (strcmp(argv[1], "version") == 0 || strcmp(argv[1], "--version") == 0) {
         printf("REX %s\n", REX_VERSION);
         return 0;

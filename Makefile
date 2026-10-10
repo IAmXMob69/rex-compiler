@@ -6,12 +6,14 @@ CC     ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-function
 override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
 
-.PHONY: all install uninstall test clean
+SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/inspect.c
+
+.PHONY: all install uninstall test unit clean
 
 all: rex
 
-rex: src/rex.c src/elf.c
-	$(CC) $(CFLAGS) -o rex src/rex.c src/elf.c
+rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h
+	$(CC) $(CFLAGS) -o rex $(SRCS)
 	chmod +x rex
 
 install: rex
@@ -40,7 +42,12 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/share/gtksourceview-4/language-specs/rex.lang
 	rm -f $(DESTDIR)$(PREFIX)/share/mime/packages/rex.xml
 
-test: rex
+unit:
+	$(CC) $(CFLAGS) -o /tmp/rex_test_ir tests/test_ir.c src/ir.c && /tmp/rex_test_ir
+	$(CC) $(CFLAGS) -o /tmp/rex_test_elf tests/test_elf.c src/elfread.c && /tmp/rex_test_elf
+	$(CC) $(CFLAGS) -o /tmp/rex_test_x86 tests/test_x86.c src/x86_decode.c && /tmp/rex_test_x86
+
+test: rex unit
 	REX_RUNTIME=src/rexrt.c ./rex run examples/arithmetic.rex | cmp - examples/arithmetic.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/loop.rex | cmp - examples/loop.out
 	REX_RUNTIME=src/rexrt.c ./rex run examples/branch.rex | cmp - examples/branch.out
@@ -135,6 +142,9 @@ test: rex
 	cat /tmp/rexstdin.rex > /tmp/rexfifo &
 	REX_RUNTIME=src/rexrt.c ./rex asm /tmp/rexfifo | grep -q 'mov $$7'
 	rm -f /tmp/rexfifo
+	./rex inspect /tmp/stage | grep -q 'Executable segments: 1'
+	./rex disasm /tmp/stage | grep -q syscall
+	! ./rex inspect Makefile 2>/tmp/rexin.err && grep -q 'bad magic' /tmp/rexin.err
 	@echo "tests passed"
 
 clean:
