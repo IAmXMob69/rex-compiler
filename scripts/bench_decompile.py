@@ -16,7 +16,7 @@ OUT_DIR = Path(os.environ.get("BENCH_OUT", "/tmp/rex-bench-decompile"))
 
 def run(cmd, timeout=30):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"

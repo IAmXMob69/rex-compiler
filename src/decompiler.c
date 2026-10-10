@@ -31,20 +31,110 @@ typedef struct { char *s; } Ex;
 
 static Ex ex(const char *s) { return (Ex){ strdup(s ? s : "?") }; }
 static Ex exf(const char *fmt, ...) {
-    char b[256];
-    va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
-    return ex(b);
+    char *b = NULL;
+    va_list ap; va_start(ap, fmt);
+    int n = vasprintf(&b, fmt, ap);
+    va_end(ap);
+    if (n < 0 || !b) return ex("?");
+    return (Ex){ b };
 }
 static void ex_free(Ex e) { free(e.s); }
+
+/* ---- expression simplifier ----
+ * Expressions are built as fully parenthesized strings: atoms, "(a op b)"
+ * and "(op a)". split_top finds the top-level binary operator. */
+static int is_num(const char *s, long long *v) {
+    const char *p = s;
+    if (*p == '-') p++;
+    if (!*p) return 0;
+    for (; *p; p++) if (*p < '0' || *p > '9') return 0;
+    if (v) *v = atoll(s);
+    return 1;
+}
+static int split_top(const char *s, char **l, char **op, char **r) {
+    size_t n = strlen(s);
+    if (n < 5 || s[0] != '(' || s[n - 1] != ')') return 0;
+    int depth = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '(' || s[i] == '[') depth++;
+        else if (s[i] == ')' || s[i] == ']') { depth--; if (depth == 0 && i != n - 1) return 0; }
+        else if (s[i] == ' ' && depth == 1 && i > 1) {
+            size_t j = i + 1;
+            while (j < n && s[j] != ' ') j++;
+            if (j >= n - 1) return 0;
+            *l = strndup(s + 1, i - 1);
+            *op = strndup(s + i + 1, j - i - 1);
+            *r = strndup(s + j + 1, n - j - 2);
+            return 1;
+        }
+    }
+    return 0;
+}
+static const char *rel_neg(const char *op) {
+    static const char *pairs[][2] = { {"==","!="}, {"!=","=="}, {"<",">="}, {">=","<"}, {">","<="}, {"<=",">"} };
+    for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++)
+        if (!strcmp(op, pairs[i][0])) return pairs[i][1];
+    return NULL;
+}
+/* Identities (x+0, x*1, ...) apply in address arithmetic only, so source-level
+ * shapes survive and match --ir keeps working. */
+static int g_addr;
 static Ex ex_bin(const char *op, Ex a, Ex b) {
+    long long x, y;
+    int na = is_num(a.s, &x), nb = is_num(b.s, &y);
+    if (g_addr && nb && y == 0 && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "|") ||
+                         !strcmp(op, "^") || !strcmp(op, "<<") || !strcmp(op, ">>"))) { ex_free(b); return a; }
+    if (g_addr && na && x == 0 && (!strcmp(op, "+") || !strcmp(op, "|"))) { ex_free(a); return b; }
+    if (g_addr && nb && y == 1 && (!strcmp(op, "*") || !strcmp(op, "/"))) { ex_free(b); return a; }
+    if (g_addr && na && x == 1 && !strcmp(op, "*")) { ex_free(a); return b; }
+    /* (a + -k) -> (a - k) */
+    if (nb && y < 0 && !strcmp(op, "+")) { ex_free(b); Ex r = exf("(%s - %lld)", a.s, -y); ex_free(a); return r; }
     Ex r = exf("(%s %s %s)", a.s, op, b.s);
     ex_free(a); ex_free(b);
     return r;
 }
 static Ex ex_un(const char *op, Ex a) {
+    size_t n = strlen(a.s);
+    /* double negation */
+    if ((!strcmp(op, "-") || !strcmp(op, "!") || !strcmp(op, "~")) && n > 3 &&
+        a.s[0] == '(' && a.s[1] == op[0] && a.s[n - 1] == ')') {
+        /* only when the inner "(op X)" spans the whole string */
+        int depth = 0, whole = 1;
+        for (size_t i = 0; i < n; i++) {
+            if (a.s[i] == '(') depth++;
+            else if (a.s[i] == ')') { depth--; if (depth == 0 && i != n - 1) { whole = 0; break; } }
+        }
+        if (whole && (a.s[2] != '=')) { Ex r = (Ex){ strndup(a.s + 2, n - 3) }; ex_free(a); return r; }
+    }
+    if (!strcmp(op, "!")) {
+        char *l, *o, *r;
+        if (split_top(a.s, &l, &o, &r)) {
+            const char *neg = rel_neg(o);
+            Ex res = neg ? exf("(%s %s %s)", l, neg, r) : (Ex){ NULL };
+            free(l); free(o); free(r);
+            if (neg) { ex_free(a); return res; }
+        }
+        long long v;
+        if (is_num(a.s, &v)) { ex_free(a); return exf("%d", v == 0); }
+    }
+    if (!strcmp(op, "-")) { long long v; if (is_num(a.s, &v)) { ex_free(a); return exf("%lld", -v); } }
     Ex r = exf("(%s%s)", op, a.s);
     ex_free(a);
     return r;
+}
+/* Drop one pair of outer parentheses for statement / argument contexts. */
+static const char *bare(const char *s, char *buf, size_t n) {
+    size_t L = strlen(s);
+    if (L >= 2 && s[0] == '(' && s[L - 1] == ')' && L - 1 < n) {
+        int depth = 0;
+        for (size_t i = 0; i < L; i++) {
+            if (s[i] == '(') depth++;
+            else if (s[i] == ')') { depth--; if (depth == 0 && i != L - 1) return s; }
+        }
+        memcpy(buf, s + 1, L - 2); buf[L - 2] = 0;
+        return buf;
+    }
+    return s;
 }
 
 typedef struct {
@@ -122,36 +212,44 @@ static void slot_hint(Fun *f, int off, int hint) {
         if (f->slots[i].off == off && f->slots[i].hint == 0) f->slots[i].hint = hint;
 }
 
-static Ex mem_ex(D *d, const IrOperand *o) {
+/* REX local arrays: element i lives at fp + disp - 8*i, addressed as
+ * [rbp + rax*1 + disp] with rax = -(i*8). Return i, or NULL. */
+static char *neg8_index(const char *ix) {
+    long long v;
+    if (is_num(ix, &v)) return NULL; /* numeric handled by caller */
+    size_t n = strlen(ix);
+    if (n > 10 && !strncmp(ix, "(-(", 3) && !strcmp(ix + n - 6, " * 8))")) return strndup(ix + 3, n - 9);
+    return NULL;
+}
+static Ex mem_ex_(D *d, const IrOperand *o) {
     if (o->base == 5 && o->index == IR_NOREG) {
         const char *n = slot_name(d->cur, (int)o->disp);
         if (n) return ex(n);
         return exf("m%d", (int)o->disp);
     }
-    if (o->base == 5 && o->index != IR_NOREG && o->scale >= 1) {
-        /* Local array cell: nearest slot at or below disp. */
-        const char *base = NULL;
-        int best = 1<<30, base_off = 0;
-        for (int i = 0; i < d->cur->nslots; i++) {
-            int dlt = (int)o->disp - d->cur->slots[i].off;
-            if (dlt >= 0 && dlt % (o->scale ? o->scale : 1) == 0 && (!base || dlt < best)) {
-                base = d->cur->slots[i].name; best = dlt; base_off = d->cur->slots[i].off;
-            }
+    if (o->base == 4 && o->index == IR_NOREG && o->disp >= 0 && o->disp % 8 == 0) {
+        int k = (int)(o->disp / 8);
+        if (k < d->nstk) return ex(d->stk[d->nstk - 1 - k].s);
+    }
+    if (o->base == 5 && o->index != IR_NOREG) {
+        const char *base = slot_name(d->cur, (int)o->disp);
+        Ex ix = getr(d, o->index);
+        long long v;
+        char *i = NULL;
+        if (o->scale == 1) {
+            if (is_num(ix.s, &v) && v <= 0 && v % 8 == 0) { i = malloc(24); if (i) snprintf(i, 24, "%lld", -v / 8); }
+            else i = neg8_index(ix.s);
         }
-        if (base) slot_hint(d->cur, base_off, 1);
-        if (base) {
-            Ex ix = getr(d, o->index);
-            if (best) {
-                Ex r = exf("%s[(%s + %d)]", base, ix.s, best / 8);
-                ex_free(ix);
-                return r;
-            }
-            Ex r = exf("%s[%s]", base, ix.s);
-            ex_free(ix);
+        if (base && i) {
+            slot_hint(d->cur, (int)o->disp, 1);
+            Ex r = exf("%s[%s]", base, i);
+            free(i); ex_free(ix);
             return r;
         }
+        free(i);
+        ex_free(ix);
+        if (base) slot_hint(d->cur, (int)o->disp, 1);
     }
-    if (o->base == 5) o = o; /* keep going */
     Ex b = o->base == 5 ? ex("fp") : (o->base != IR_NOREG ? getr(d, o->base) : ex("0"));
     if (o->index != IR_NOREG) {
         Ex ix = getr(d, o->index);
@@ -159,8 +257,28 @@ static Ex mem_ex(D *d, const IrOperand *o) {
         b = ex_bin("+", b, ix);
     }
     if (o->disp) b = ex_bin("+", b, exf("%lld", (long long)o->disp));
-    Ex r = exf("*(%s)", b.s);
+    /* Heap/pointer cell: *(B + X*8) -> B[X], *(B + 8k) -> B[k] (REX scales by 8). */
+    char *l, *op, *r;
+    if (split_top(b.s, &l, &op, &r)) {
+        Ex out = (Ex){ NULL };
+        long long k;
+        size_t rn = strlen(r);
+        if (!strcmp(op, "+") && is_num(r, &k) && k > 0 && k % 8 == 0 && l[0] != '(')
+            out = exf("%s[%lld]", l, k / 8);
+        else if (!strcmp(op, "+") && rn > 6 && r[0] == '(' && !strcmp(r + rn - 5, " * 8)") && l[0] != '(')
+            out = exf("%s[%.*s]", l, (int)(rn - 6), r + 1);
+        free(l); free(op); free(r);
+        if (out.s) { ex_free(b); return out; }
+    }
+    Ex res = exf("*(%s)", b.s);
     ex_free(b);
+    return res;
+}
+
+static Ex mem_ex(D *d, const IrOperand *o) {
+    int save = g_addr; g_addr = 1;
+    Ex r = mem_ex_(d, o);
+    g_addr = save;
     return r;
 }
 
@@ -198,6 +316,23 @@ static const char *cop(IrCond c) {
     case IR_CC_GE: case IR_CC_UGE: return ">=";
     default: return "?";
     }
+}
+
+
+/* Condition from the last cmp/test for condition code cc (taken sense). */
+static Ex cond_from(D *d, const IrInsn *cmp, IrCond cc) {
+    if (!cmp) return ex("1");
+    if (cmp->op == IR_CMP) return ex_bin(cop(cc), op_ex(d, &cmp->a), op_ex(d, &cmp->b));
+    Ex v;
+    if (cmp->a.kind == cmp->b.kind && cmp->a.kind == IR_O_REG && cmp->a.reg == cmp->b.reg) v = op_ex(d, &cmp->a);
+    else v = ex_bin("&", op_ex(d, &cmp->a), op_ex(d, &cmp->b));
+    if (cc == IR_CC_EQ) return ex_bin("==", v, ex("0"));
+    if (cc == IR_CC_NE) return ex_bin("!=", v, ex("0"));
+    if (cc == IR_CC_NEG || cc == IR_CC_LT) return ex_bin("<", v, ex("0"));
+    if (cc == IR_CC_POS || cc == IR_CC_GE) return ex_bin(">=", v, ex("0"));
+    if (cc == IR_CC_LE) return ex_bin("<=", v, ex("0"));
+    if (cc == IR_CC_GT) return ex_bin(">", v, ex("0"));
+    return v;
 }
 
 static void classify(D *d) {
@@ -341,7 +476,8 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         break;
     case IR_STORE: {
         Ex dst = op_ex(d, &in->dst), src = op_ex(d, &in->a);
-        emit(d, depth, "%s = %s;", dst.s, src.s);
+        char bb[1024];
+        emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
         ex_free(dst); ex_free(src);
         break;
     }
@@ -377,12 +513,7 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         d->cmp = in;
         break;
     case IR_SETCC: {
-        Ex v;
-        if (d->cmp && d->cmp->op == IR_CMP)
-            v = ex_bin(cop(in->cc), op_ex(d, &d->cmp->a), op_ex(d, &d->cmp->b));
-        else if (d->cmp)
-            v = in->cc == IR_CC_EQ ? ex_un("!", op_ex(d, &d->cmp->a)) : op_ex(d, &d->cmp->a);
-        else v = ex("0");
+        Ex v = d->cmp ? cond_from(d, d->cmp, in->cc) : ex("0");
         if (in->dst.kind == IR_O_REG) setr(d, in->dst.reg, v);
         else ex_free(v);
         break;
@@ -391,12 +522,7 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         /* REX supports cond ? t : f (parsed as N_IF with num=1). */
         Ex src = op_ex(d, &in->a);
         Ex oldv = in->dst.kind == IR_O_REG ? getr(d, in->dst.reg) : ex("0");
-        Ex cond;
-        if (d->cmp && d->cmp->op == IR_CMP)
-            cond = ex_bin(cop(in->cc), op_ex(d, &d->cmp->a), op_ex(d, &d->cmp->b));
-        else if (d->cmp)
-            cond = in->cc == IR_CC_EQ ? ex_un("!", op_ex(d, &d->cmp->a)) : op_ex(d, &d->cmp->a);
-        else cond = ex("1");
+        Ex cond = cond_from(d, d->cmp, in->cc);
         Ex tern = exf("(%s ? %s : %s)", cond.s, src.s, oldv.s);
         ex_free(cond); ex_free(src); ex_free(oldv);
         if (in->dst.kind == IR_O_REG) setr(d, in->dst.reg, tern);
@@ -425,8 +551,9 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             char args[512] = "";
             for (int a = 0; a < na; a++) {
                 Ex e = getr(d, ARG[a]);
-                if (a) strcat(args, ", ");
-                strcat(args, e.s);
+                char bb[512];
+                if (a) strncat(args, ", ", sizeof(args) - strlen(args) - 1);
+                strncat(args, bare(e.s, bb, sizeof bb), sizeof(args) - strlen(args) - 1);
                 ex_free(e);
             }
             Ex call = exf("%s(%s)", nm, args);
@@ -438,8 +565,9 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         char args[512] = "";
         for (int a = 0; a < na; a++) {
             Ex e = getr(d, ARG[a]);
-            if (a) strcat(args, ", ");
-            strcat(args, e.s);
+            char bb[512];
+            if (a) strncat(args, ", ", sizeof(args) - strlen(args) - 1);
+            strncat(args, bare(e.s, bb, sizeof bb), sizeof(args) - strlen(args) - 1);
             ex_free(e);
         }
         Ex call = exf("%s(%s)", nm, args);
@@ -527,12 +655,7 @@ static Ex br_cond(D *d, const IrInsn *br, const IrBlock *b) {
         if (br->cc == IR_CC_EQ) return ex_un("!", v);  /* branch if zero => if (!v) taken */
         return v;
     }
-    if (cmp && cmp->op == IR_CMP) return ex_bin(cop(br->cc), op_ex(d, &cmp->a), op_ex(d, &cmp->b));
-    if (cmp) {
-        Ex a = op_ex(d, &cmp->a);
-        return br->cc == IR_CC_EQ ? ex_un("!", a) : a;
-    }
-    return ex("1");
+    return cond_from(d, cmp, br->cc);
 }
 
 
@@ -700,7 +823,7 @@ static void walk2(D *d, const IrFunc *f, int bi, int until, int depth, int *seen
                         } else c = ex_un("!", ex(cond.s));
                         ex_free(cond);
                     } else c = cond;
-                    emit(d, depth, "while (%s) {", c.s);
+                    { char bb[1024]; emit(d, depth, "while (%s) {", bare(c.s, bb, sizeof bb)); }
                     ex_free(c);
                     int *seen2 = calloc((size_t)f->nblocks, sizeof(int));
                     /* Allow the header to be "seen" so body doesn't re-enter walk of header. */
@@ -740,7 +863,7 @@ static void walk2(D *d, const IrFunc *f, int bi, int until, int depth, int *seen
                     continue;
                 }
             }
-            emit(d, depth, "if (%s) {", cond.s);
+            { char bb[1024]; emit(d, depth, "if (%s) {", bare(cond.s, bb, sizeof bb)); }
             ex_free(cond);
             if (join == -2) {
                 int rb = -1;
