@@ -106,7 +106,12 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
     IrOperand s = in->nops > 1 ? conv(l, &in->ops[1]) : ir_imm(0, 8);
     IrInsn *i;
     switch (in->op) {
-    case X86_NOP:
+    case X86_NOP: case X86_ENDBR:
+        break;
+    case X86_LEAVE:
+        wrote(l, ir_reg(4, 8)); wrote(l, ir_reg(5, 8));
+        i = emit(l, IR_MOV); i->dst = ir_reg(4, 8); i->a = ir_reg(5, 8);
+        i = emit(l, IR_POP); i->dst = ir_reg(5, 8);
         break;
     case X86_MOV:
         wrote(l, d);

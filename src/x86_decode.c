@@ -90,7 +90,7 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
     out->addr = addr;
     Rd r = { p, avail < 15 ? avail : 15, 0, 0 };
     Ctx c = {0};
-    int f3 = 0, f2 = 0, o66 = 0;
+    int f3 = 0, f2 = 0, o66 = 0, seg = 0;
     unsigned b;
     for (;;) {
         b = get8(&r);
@@ -98,6 +98,7 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
         if (b == 0x66) { o66 = 1; continue; }
         if (b == 0xf3) { f3 = 1; continue; }
         if (b == 0xf2) { f2 = 1; continue; }
+        if (b == 0x2e || b == 0x3e) { seg = 1; continue; }  /* only legal before a nop */
         break;
     }
     if (b >= 0x40 && b <= 0x4f) {
@@ -108,7 +109,15 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
     int v = c.opsz;
     X86Operand e, g;
 
-    if (f2 || (f3 && b != 0x90 && b != 0xc3)) goto bad;
+    if (f2 || (f3 && b != 0x90 && b != 0xc3 && b != 0x0f)) goto bad;
+    if (f3 && b == 0x0f) {
+        /* endbr64 f3 0f 1e fa, endbr32 f3 0f 1e fb; nothing else with f3 0f. */
+        unsigned b2 = get8(&r), b3 = get8(&r);
+        if (r.bad || c.rex || o66 || seg || b2 != 0x1e || (b3 != 0xfa && b3 != 0xfb)) goto bad;
+        out->op = X86_ENDBR; out->cc = b3 == 0xfa ? 64 : 32;
+        out->size = (int)r.i;
+        return out->size;
+    }
 
     if (b < 0x40 && (b & 7) < 6) {
         X86Opcode op = alu[b >> 3];
@@ -183,6 +192,8 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
         else if (b <= 0xd1) cnt = imm_op(1, 1);
         else { Ctx z = {0}; cnt = reg_op(&z, 1, 1); }
         set2(out, op, e, cnt);
+    } else if (b == 0xc9) {
+        out->op = X86_LEAVE;
     } else if (b == 0xc3) {
         out->op = X86_RET;
     } else if (b == 0xc2) {
@@ -245,6 +256,7 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
     }
     if (r.bad) goto bad;
     if (f3 && out->op != X86_NOP && out->op != X86_RET) goto bad;
+    if (seg && out->op != X86_NOP) goto bad;
     out->size = (int)r.i;
     for (int k = 0; k < out->nops; k++) {
         X86Operand *o = &out->ops[k];
@@ -280,7 +292,7 @@ static const char *names[X86_OP_COUNT] = {
     "and", "or", "xor", "shl", "shr", "sar",
     "cmp", "test", "inc", "dec", "neg", "not",
     "jmp", "j", "set", "call", "ret",
-    "nop", "cqo", "syscall",
+    "nop", "cqo", "syscall", "endbr64", "leave",
 };
 static const char *ccs[16] = { "o","no","b","ae","e","ne","be","a","s","ns","p","np","l","ge","le","g" };
 
@@ -323,6 +335,7 @@ void x86_format(const X86Insn *in, char *buf, size_t n) {
     switch (in->op) {
     case X86_JCC: snprintf(mn, sizeof(mn), "j%s", x86_cc_name(in->cc)); break;
     case X86_SETCC: snprintf(mn, sizeof(mn), "set%s", x86_cc_name(in->cc)); break;
+    case X86_ENDBR: snprintf(mn, sizeof(mn), "%s", in->cc == 32 ? "endbr32" : "endbr64"); break;
     case X86_CQO: snprintf(mn, sizeof(mn), "%s", in->ops[0].size == 8 ? "cqo" : in->ops[0].size == 2 ? "cwtd" : "cltd"); break;
     case X86_MOVZX: case X86_MOVSX:
         snprintf(mn, sizeof(mn), "%s%c%c", x86_op_name(in->op), suffix(in->ops[1].size), suffix(in->ops[0].size)); break;

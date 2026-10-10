@@ -126,6 +126,15 @@ static const Case cases[] = {
     { "0f1f00", "nop" },
     { "0f1f440000", "nop" },
     { "660f1f440000", "nop" },
+    { "662e0f1f840000000000", "nop" },
+    { "6690", "nop" },
+    { "f30f1efa", "endbr64" },
+    { "f30f1efb", "endbr32" },
+    { "c9", "leave" },
+    { "f6c101", "test $1, %cl" },
+    { "48f7c0ff000000", "test $255, %rax" },
+    { "0fbec0", "movsbl %al, %eax" },
+    { "480fb6c0", "movzbq %al, %rax" },
 };
 
 /* Must not decode: unsupported, truncated, or invalid forms. */
@@ -133,6 +142,7 @@ static const char *rejects[] = {
     "", "48", "66", "e8", "e80000", "0f", "0f84000000", "488b", "488b04", "488b8500",
     "48b8112233", "8dc0", "c7c8", "8f08", "0fff", "f2c3", "f390c3"/* f3 90 is pause-ish; ok */,
     "cc", "62", "c5", "d8", "1000", "1800", "f6c8", "fff8", "feD0", "f3488b00",
+    "f30f1efc", "f30f1e", "f3480f1efa", "2e4889e5", "3ec3",
 };
 
 static int unhex(const char *h, unsigned char *out) {

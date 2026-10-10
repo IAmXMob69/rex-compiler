@@ -31,6 +31,8 @@ typedef enum {
     X86_CMP, X86_TEST, X86_INC, X86_DEC, X86_NEG, X86_NOT,
     X86_JMP, X86_JCC, X86_SETCC, X86_CALL, X86_RET,
     X86_NOP, X86_CQO, X86_SYSCALL,
+    X86_ENDBR,          /* endbr64/endbr32: no-op for the lift */
+    X86_LEAVE,          /* mov %rbp, %rsp; pop %rbp */
     X86_OP_COUNT
 } X86Opcode;
 
