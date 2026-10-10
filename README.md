@@ -14,19 +14,24 @@ It is for Arch Linux. It also has a few XFCE files so Mousepad can color the cod
 
 ## Commands
 
-Everyday names (shortcuts):
+Start here. These are the everyday names:
 
-| Command | Means |
-|---------|--------|
+| You type | What it does |
+|---|---|
 | `rex run file.rex` | compile and run |
 | `rex build file.rex` | make a binary (`-o` optional, default `a.out`) |
-| `rex look elf` | peek at ELF headers (`inspect`) |
-| `rex show elf` | disassemble (`disasm`) |
-| `rex rebuild elf` | recompile from IR (`recompile`, `-o` optional, default `a.out`) |
-| `rex tosource elf` / `rex undo elf` | recover `.rex` (`decompile`, `-o` optional, default `out.rex`) |
-| `rex help` | plain help (also `-h`, `--help`) |
+| `rex look file` | peek at headers |
+| `rex show file` | show the instructions |
+| `rex rebuild file` | rebuild from machine IR (`-o` optional) |
+| `rex tosource file` / `rex undo file` | turn a binary back into `.rex` |
+| `rex compare file` | rebuild and check the new binary matches |
+| `rex match file` | tosource, rebuild that source, check it matches |
+| `rex explain E101` | plain English for an error code |
+| `rex help` | short help (also `-h`, `--help`) |
 
-All older command names still work. An unknown command prints `rex: unknown command 'X' (try rex help)` and exits 2.
+If I cannot do something I print a short reason first, then a code like `E101`. Run `rex explain E101` to see it again. An unknown command says so and points you at `rex help`.
+
+Longer names still work: `inspect`, `disasm`, `recompile`, `decompile`, `ir`, `check`, `asm`, `elf`, `version`. Flags like `--cfg`, `--function`, `--poison`, `--verify` are optional extras.
 
 ## Features
 
@@ -181,8 +186,10 @@ rex ir --function main arith
 rex recompile arith -o arith.re            # new code, old data
 rex recompile --poison arith -o arith.re   # old code filled with int3
 rex recompile --debug arith -o arith.re    # per-function address map
+rex recompile --verify arith -o arith.re   # run both, compare exit+output
 rex decompile arith -o arith.rex           # recovered source
 rex decompile --verbose arith -o arith.rex
+rex decompile --verify arith -o arith.rex  # rebuild source, compare to original
 ```
 
 Verified on `examples/arithmetic.rex`: the original, the `--poison` recompile, and `rex run arith.rex` all print the same six lines.
@@ -233,16 +240,15 @@ Decompile: names are invented. A call through a register prints the pointer expr
 
 ## Roadmap
 
-Done: ELF64 loader behind a registry, PE recognition stub, machine IR, x86 lift of the REX instruction set, recompile, decompile for REX-shaped binaries, CFG recursive descent from entry and call targets.
+Done: ELF64 loader behind a registry, PE recognition stub, numbered failure codes (E1xx–E6xx), machine IR, x86 lift including `cmovcc`/`leave`/`endbr`/`hlt`, recompile and decompile for REX-shaped binaries, `--verify` on recompile/decompile, CFG recursive descent from entry + call targets + ELF symbols, indirect jumps end a block instead of aborting the whole CFG.
 
 Next (no schedule):
 
 1. Real PE section/import parsing (then PE → IR for the same x86-64 subset).
-2. Fuller x86-64: SSE moves, remaining movzx/movsx forms, cmovcc, more imul forms, string ops, shifts by `%cl` in every width, `bt*`, `xchg`/`cmpxchg`, general rip-relative, PIC/PLT calls, jump tables.
-3. CFG recovery that does not depend on REX prologues: recursive descent plus linear sweep, seeds from symbols and `.eh_frame`, reducible-graph structuring.
-4. Explicit numbered failure modes for every unsupported format, opcode and recovery pattern.
-5. PIE / shared objects / relocations.
-6. Later: Mach-O, ARM64, RISC-V.
+2. Fuller x86-64: SSE moves, more imul forms, string ops, `bt*`, `xchg`/`cmpxchg`, PIC/PLT calls, jump tables.
+3. Reducible-graph structuring (dominators → if/else/while) when no REX pattern matches; `.eh_frame` seeds.
+4. PIE / shared objects / relocations.
+5. Later: Mach-O, ARM64, RISC-V.
 
 ## Files
 

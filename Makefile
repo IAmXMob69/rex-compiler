@@ -6,13 +6,13 @@ CC     ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
 
-SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/codegen.c src/recompiler.c src/decompiler.c src/inspect.c src/loader.c
+SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/codegen.c src/recompiler.c src/decompiler.c src/inspect.c src/loader.c src/verify.c
 
 .PHONY: all install uninstall test unit clean
 
 all: rex
 
-rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h src/x86_lift.h src/codegen.h src/recompiler.h src/decompiler.h src/loader.h
+rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h src/x86_lift.h src/codegen.h src/recompiler.h src/decompiler.h src/loader.h src/verify.h
 	$(CC) $(CFLAGS) -o rex $(SRCS)
 	chmod +x rex
 
@@ -51,6 +51,7 @@ unit:
 RT = /tmp/rex-test
 
 test: rex unit
+	$(CC) $(CFLAGS) -o /tmp/rex_test_cli tests/test_cli.c && /tmp/rex_test_cli
 	rm -rf $(RT) && mkdir -p $(RT)
 	./rex run examples/arithmetic.rex | cmp - examples/arithmetic.out
 	./rex run examples/loop.rex | cmp - examples/loop.out
@@ -153,6 +154,9 @@ test: rex unit
 	./rex disasm --function main /tmp/stage | grep -q 'return'
 	./rex recompile --poison /tmp/stage -o /tmp/stage.re
 	/tmp/stage.re | cmp - /tmp/stage.out 2>/dev/null || /tmp/stage.re | cmp - examples/stage.out
+	./rex build examples/arithmetic.rex -o /tmp/arith
+	./rex recompile --verify --poison /tmp/arith -o /tmp/arith.re
+	./rex decompile --verify /tmp/arith -o /tmp/arith.dec.rex
 	./rex decompile /tmp/stage -o /tmp/stage.dec.rex
 	./rex run /tmp/stage.dec.rex | cmp - examples/stage.out
 	printf '%s\n' 'fn add(a,b){return a+b;}' 'fn main(){print(add(40,2));}' > /tmp/leaf.rex

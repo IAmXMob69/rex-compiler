@@ -18,7 +18,20 @@ binary      ELF64 → rex_elf_open → x86 decoder → cfg_build → x86_lift �
 
 ## CLI (`main` in `src/rex.c`)
 
-`alias_cmd` maps `look` → `inspect`, `show` → `disasm`, `rebuild` → `recompile`, `tosource` / `undo` → `decompile`, and `help` / `-h` / `--help` → `print_help`. `-o` is optional and may appear anywhere: `build` and `recompile` default to `a.out`, `decompile` to `out.rex`. `build` with no file says so and exits 2; `recompile`/`decompile` with no input print help and exit 2. An unknown command prints `rex: unknown command 'X' (try rex help)` and exits 2.
+Everyday names are the primary surface (`print_help`). `alias_cmd` maps:
+
+| Everyday | Internal |
+|---|---|
+| `look` | `inspect` |
+| `show` | `disasm` |
+| `rebuild` | `recompile` |
+| `tosource` / `undo` | `decompile` |
+| `compare` | recompile + run-both check |
+| `match` | decompile + compile + run-both check |
+| `explain` | look up an `E` code |
+| `help` / `-h` / `--help` | `print_help` |
+
+`-o` is optional and may appear anywhere: `build` / `recompile` / `compare` default to `a.out`, `decompile` / `match` to `out.rex`. An unknown command prints `rex: unknown command 'X' (try rex help)` and exits 2. Failures print a plain-English line, then `E<nnn>: …` details (`rex_errf`).
 
 ## Tests
 
@@ -58,6 +71,31 @@ This is the only runtime. The old libc `src/rexrt.c`, the dead `rt_path` lookup 
 
 Anything else returns `REX_BIN_ERR_UNRECOGNIZED` (exit 2) with `unrecognized binary format: <up to 8 bytes as hex>`. Callers (`inspect`, `disasm`, `ir`, `recompile`, `decompile`) go through the registry and propagate those exit codes.
 
+
+## Failure codes
+
+Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex explain E101` reprints the plain line. The process exit status is the code.
+
+| Code | Area | Meaning |
+| --- | --- | --- |
+| E100 | loader | unrecognized binary format (first bytes in hex) |
+| E101 | loader | PE/COFF recognized; loading not implemented |
+| E102 | loader | ELF refused (class, endian, type, machine, …) |
+| E103 | loader | open/read failure |
+| E200 | decode | unsupported or invalid opcode at address |
+| E300 | lift | cannot model instruction exactly |
+| E302 | lift | idiv / div shape |
+| E400 | CFG | recovery failed |
+| E401 | CFG | indirect jump (reserved; today the block just ends) |
+| E402 | CFG | irreducible control flow (reserved) |
+| E403 | CFG | address outside executable code |
+| E500 | recompile | encode / layout failure |
+| E501 | recompile | `--verify` mismatch |
+| E600 | decompile | recovery failure |
+| E601 | decompile | `--verify` mismatch |
+
+No silent partial output: a failure returns the code and prints the message. `--verify` on `recompile` / `decompile` runs both sides with no args and compares exit status plus combined stdout/stderr.
+
 ## ELF loader (`src/elfread.c`)
 
 `rex_elf_open` / `rex_elf_parse` treat the input as untrusted. Every offset is bounds-checked (`in_file`); nothing is executed. Accepts ELF64, little-endian, x86-64, OS ABI 0 or 3, `ET_EXEC`. Refuses 32-bit, big-endian, relocatable, shared/PIE, core, extended program header and section counts. `rex_elf_code_at` maps a virtual address to bytes.
@@ -66,7 +104,7 @@ Anything else returns `REX_BIN_ERR_UNRECOGNIZED` (exit 2) with `unrecognized bin
 
 The decoder turns bytes into `X86Insn` with destination-first operands. It covers what REX emits: mov, movzx/movsx, lea, push/pop, add/sub/and/or/xor, shl/shr/sar, inc/dec, neg/not, imul, idiv/div, cqo, cmp/test, jmp/jcc, call, ret, setcc, syscall, nop.
 
-`cfg_build` does recursive descent from the entry point. No linear sweep. Direct calls start new functions; jumps stay inside the function. A rip-relative `lea` or `mov` also starts a function (function pointers), but only when the target's first byte is `push rbp` (0x55) or it begins `f3 0f` (`endbr64`). Indirect jumps are refused. `cfg_is_exit` marks blocks that end in an exit syscall. `main_addr` is the first direct call from the entry.
+`cfg_build` does recursive descent from the entry point, then seeds more addresses from ELF `SYMTAB`/`DYNSYM` function symbols (paired with `.strtab`/`.dynstr`). No linear sweep. Direct calls start new functions; jumps stay inside the function. A rip-relative `lea` or `mov` also starts a function when the target begins with `push rbp` (0x55) or `endbr64`. Indirect jumps end the current block with no successors (they do not abort the whole CFG). `hlt`/`ud2` are terminators. Symbol names rename functions; `main` sets `main_addr` when present, else it stays the first direct call from the entry.
 
 ## Machine IR (`src/ir.h`, `src/ir.c`)
 
@@ -113,13 +151,12 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 
 ## x86-64 decoder / lift roadmap
 
-Present today (decoder + lift unless noted): the REX emission set, plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32` (decoded as `ENDBR`, lifted as nop), `leave` (lifted to `mov rsp,rbp; pop rbp`), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate (including `f6`/`f7 /0`), `setcc`, `cqo`, shifts by imm and by `%cl`.
+Present today (decoder + lift unless noted): the REX emission set, plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32`, `leave`, `hlt`/`ud2`, `cmovcc` (IR_CMOV), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate, `setcc`, `cqo`, shifts by imm and by `%cl`.
 
 Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` output:
 
 1. Remaining `movzx`/`movsx` / `movsxd` forms; `cdqe`.
-2. `cmovcc` (needs a select form in the IR or a branch diamond).
-3. More `imul` forms (one-operand full rdx:rax).
+2. More `imul` forms (one-operand full rdx:rax).
 4. String ops (`movs`, `stos`, `rep` prefixes) — likely refused with a clear error for a long time.
 5. `bt` / `bts` / `btr` / `btc`, `xchg`, `cmpxchg`, `xadd`.
 6. General rip-relative memory in more ops; PIC/PLT call shapes.
@@ -129,10 +166,9 @@ Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` outpu
 ## Roadmap (tool)
 
 1. Real PE section and import parsing; then PE → the same IR subset.
-2. CFG recovery independent of REX prologues: recursive descent + linear sweep, seeds from symbols and `.eh_frame`, reducible-graph structuring (dominators → if/else/while). Keep the REX path as the high-quality case.
-3. Numbered, stable failure codes for every unsupported format, opcode and recovery pattern; no silent partial output.
-4. PIE, shared objects, relocations.
-5. Mach-O, ARM64, RISC-V — each behind the same loader registry.
+2. Reducible-graph structuring (dominators → if/else/while) when no REX pattern matches; `.eh_frame` seeds. Keep the REX path as the high-quality case.
+3. PIE, shared objects, relocations.
+4. Mach-O, ARM64, RISC-V — each behind the same loader registry.
 
 ## Feature matrix
 

@@ -10,6 +10,8 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "rex_err.h"
+#include "verify.h"
 
 /* REX — a small native compiler for Arch.
  * Integer language, SysV AMD64, syscall-only runtime embedded in elf.c.
@@ -2324,25 +2326,29 @@ static char *read_file(const char *path, int *len) {
 
 static void print_help(void) {
     fprintf(stderr,
-        "REX %s — a small native compiler\n"
+        "REX %s — compile, look inside, and rebuild programs\n"
         "\n"
         "Everyday commands:\n"
-        "  rex run <file.rex>              compile and run\n"
-        "  rex build <file.rex> [-o bin]   make a binary (default a.out)\n"
-        "  rex look <elf>                  peek at an ELF (same as inspect)\n"
-        "  rex show <elf>                  show disassembly (same as disasm)\n"
-        "  rex rebuild <elf> [-o out]      rebuild from machine IR (same as recompile)\n"
-        "  rex tosource <elf> [-o out.rex] turn a binary back into .rex (same as decompile)\n"
-        "  rex undo <elf> [-o out.rex]     same as tosource\n"
-        "  rex help                        this help\n"
+        "  rex run <file.rex>                 compile and run\n"
+        "  rex build <file.rex> [-o bin]      make a binary (default a.out)\n"
+        "  rex look <file>                    peek at headers\n"
+        "  rex show <file>                    show the instructions\n"
+        "  rex rebuild <file> [-o out]        rebuild from machine IR\n"
+        "  rex tosource <file> [-o out.rex]   turn a binary back into .rex\n"
+        "  rex undo <file> [-o out.rex]       same as tosource\n"
+        "  rex compare <file> [-o out]        rebuild and check it matches\n"
+        "  rex match <file> [-o out.rex]      tosource, rebuild, check it matches\n"
+        "  rex explain E101                   plain English for an error code\n"
+        "  rex help                           this help\n"
         "\n"
-        "Also still work:\n"
+        "Also still work (same tools, longer names):\n"
         "  rex check / asm / elf / inspect / disasm / ir / recompile / decompile / version\n"
-        "  rex disasm --cfg <elf>\n"
-        "  rex disasm --function F <elf>\n"
-        "  rex ir [--function F] <elf>\n"
+        "  rex show --cfg <file>              functions and blocks\n"
+        "  rex show --function F <file>       one function\n"
+        "  rex ir [--function F] <file>       print machine IR\n"
+        "  --verify on rebuild/tosource       same as compare / match\n"
         "\n"
-        "Tips: -o is optional. Names like look/show/rebuild/tosource are shortcuts.\n",
+        "Tips: -o is optional. If something fails I print a short reason, then a code like E101.\n",
         REX_VERSION);
 }
 static void usage(void) {
@@ -2413,6 +2419,9 @@ static const char *alias_cmd(const char *c) {
     if (!strcmp(c, "show")) return "disasm";
     if (!strcmp(c, "rebuild")) return "recompile";
     if (!strcmp(c, "tosource") || !strcmp(c, "undo")) return "decompile";
+    if (!strcmp(c, "compare")) return "compare";   /* rebuild + verify */
+    if (!strcmp(c, "match")) return "match";       /* tosource + verify */
+    if (!strcmp(c, "explain")) return "explain";
     if (!strcmp(c, "help") || !strcmp(c, "-h") || !strcmp(c, "--help")) return "help";
     return c;
 }
@@ -2421,6 +2430,57 @@ int main(int argc, char **argv) {
     if (argc < 2) usage();
     argv[1] = (char *)alias_cmd(argv[1]);
     if (!strcmp(argv[1], "help")) { print_help(); return 0; }
+    if (!strcmp(argv[1], "explain")) {
+        if (argc < 3) { fprintf(stderr, "rex: explain needs a code like E101\n"); return 2; }
+        const char *s = argv[2];
+        if (s[0] == 'E' || s[0] == 'e') s++;
+        int code = atoi(s);
+        char buf[256];
+        if (rex_err_explain(code, buf, sizeof(buf))) { fprintf(stderr, "rex: %s\n", buf); return 2; }
+        printf("%s\n", buf);
+        return 0;
+    }
+    if (!strcmp(argv[1], "compare")) {
+        /* rebuild + verify */
+        const char *in = NULL, *out = "a.out";
+        int debug = 0;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i], "--debug")) debug |= 1;
+            else if (!strcmp(argv[i], "--poison")) debug |= 2;
+            else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
+            else in = argv[i];
+        }
+        if (!in) { fprintf(stderr, "rex: compare needs a binary\n"); return 2; }
+        int rc = rex_recompile(in, out, debug);
+        if (rc) return rc;
+        char err[256];
+        rc = rex_verify_bins(in, out, err, sizeof(err));
+        if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+        fprintf(stderr, "rex: compare: ok — the new binary matches\n");
+        return 0;
+    }
+    if (!strcmp(argv[1], "match")) {
+        /* tosource + rebuild + verify */
+        const char *in = NULL, *out = "out.rex";
+        int verbose = 0;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i], "--verbose")) verbose = 1;
+            else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
+            else in = argv[i];
+        }
+        if (!in) { fprintf(stderr, "rex: match needs a binary\n"); return 2; }
+        int rc = rex_decompile(in, out, verbose);
+        if (rc) return rc;
+        char tmp[] = "/tmp/rexverXXXXXX";
+        int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
+        if (compile_to(out, tmp)) { unlink(tmp); return 1; }
+        char err[256];
+        rc = rex_verify_bins(in, tmp, err, sizeof(err));
+        unlink(tmp);
+        if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+        fprintf(stderr, "rex: match: ok — the recovered source matches\n");
+        return 0;
+    }
     if (strcmp(argv[1], "inspect") == 0) {
         if (argc < 3) usage();
         return rex_cmd_inspect(argv[2]);
@@ -2432,26 +2492,45 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "decompile") == 0) {
         const char *in = NULL, *out = "out.rex";
-        int verbose = 0;
+        int verbose = 0, verify = 0;
         for (int i = 2; i < argc; i++) {
             if (!strcmp(argv[i], "--verbose")) verbose = 1;
+            else if (!strcmp(argv[i], "--verify")) verify = 1;
             else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
             else in = argv[i];
         }
         if (!in) usage();
-        return rex_decompile(in, out, verbose);
+        int rc = rex_decompile(in, out, verbose);
+        if (rc || !verify) return rc;
+        /* Rebuild decompiled source and compare behavior to the original. */
+        char tmp[] = "/tmp/rexverXXXXXX";
+        int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
+        if (compile_to(out, tmp)) { unlink(tmp); return 1; }
+        char err[256];
+        rc = rex_verify_bins(in, tmp, err, sizeof(err));
+        unlink(tmp);
+        if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+        fprintf(stderr, "rex: match: ok — the recovered source matches\n");
+        return 0;
     }
     if (strcmp(argv[1], "recompile") == 0) {
         const char *in = NULL, *out = "a.out";
-        int debug = 0;
+        int debug = 0, verify = 0;
         for (int i = 2; i < argc; i++) {
             if (!strcmp(argv[i], "--debug")) debug |= 1;
             else if (!strcmp(argv[i], "--poison")) debug |= 2;
+            else if (!strcmp(argv[i], "--verify")) verify = 1;
             else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
             else in = argv[i];
         }
         if (!in) usage();
-        return rex_recompile(in, out, debug);
+        int rc = rex_recompile(in, out, debug);
+        if (rc || !verify) return rc;
+        char err[256];
+        rc = rex_verify_bins(in, out, err, sizeof(err));
+        if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+        fprintf(stderr, "rex: compare: ok — the new binary matches\n");
+        return 0;
     }
     if (strcmp(argv[1], "disasm") == 0) {
         if (argc >= 4 && strcmp(argv[2], "--cfg") == 0) return rex_cmd_disasm_func(argv[3], NULL);
