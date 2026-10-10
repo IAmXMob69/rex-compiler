@@ -1790,18 +1790,6 @@ static void gen_expr(Node *n) {
     }
 }
 
-static void emit_string_arg(Node *n, const char *regnote) {
-    (void)regnote;
-    if (n->kind != N_STR) {
-        gen_expr(n);
-        emit("    mov %%rax, %%rdi");
-        return;
-    }
-    int id = str_id++;
-    emit("    lea .LS%d(%%rip), %%rdi", id);
-    /* stash id on the node via num for later rodata — use parallel table */
-    n->num = id;
-}
 
 static void remember_str(int id, const char *s) {
     if (g_nstr == g_strcap) {
@@ -1904,7 +1892,7 @@ static void gen_stmt(Node *n) {
                 return;
             }
             if (n->b) {
-                if (g_fn->locals[i].len == -2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs") || !strcmp(n->name, "firsts") || glob_find(n->name) >= 0 && (!strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs") || !strcmp(n->name, "firsts"))) {
+                if (g_fn->locals[i].len == -2 || !strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs") || !strcmp(n->name, "firsts") || (glob_find(n->name) >= 0 && (!strcmp(n->name, "names") || !strcmp(n->name, "lens") || !strcmp(n->name, "offs") || !strcmp(n->name, "firsts")))) {
                     gen_expr(n->b);
                     emit_push("%rax");
                     gen_expr(n->a);
@@ -2334,51 +2322,34 @@ static char *read_file(const char *path, int *len) {
     return buf;
 }
 
-static void usage(void) {
+static void print_help(void) {
     fprintf(stderr,
-        "REX %s — native compiler for Arch\n"
-        "usage:\n"
-        "  rex run <file.rex>           compile and execute\n"
-        "  rex build <file.rex> -o bin  emit a binary\n"
-        "  rex check <file.rex>         parse and type-check only\n"
-        "  rex asm <file.rex>           write assembly to stdout\n"
-        "  rex elf <file.s> -o bin    assemble emitted assembly\n"
-        "  rex inspect <elf>            show ELF64 headers and segments\n"
-        "  rex disasm <elf>             disassemble executable segments\n"
-        "  rex disasm --cfg <elf>       functions and basic blocks\n"
-        "  rex disasm --function F <elf> one function (start, main, fn_ADDR, ADDR)\n"
-        "  rex ir [--function F] <elf>  lift to machine IR and print it\n"
-        "  rex recompile <elf> -o out   lift to IR and generate a new ELF\n"
-        "  rex decompile <elf> -o out.rex  recover REX source from a binary\n"
-        "  rex version\n",
+        "REX %s — a small native compiler\n"
+        "\n"
+        "Everyday commands:\n"
+        "  rex run <file.rex>              compile and run\n"
+        "  rex build <file.rex> [-o bin]   make a binary (default a.out)\n"
+        "  rex look <elf>                  peek at an ELF (same as inspect)\n"
+        "  rex show <elf>                  show disassembly (same as disasm)\n"
+        "  rex rebuild <elf> [-o out]      rebuild from machine IR (same as recompile)\n"
+        "  rex tosource <elf> [-o out.rex] turn a binary back into .rex (same as decompile)\n"
+        "  rex undo <elf> [-o out.rex]     same as tosource\n"
+        "  rex help                        this help\n"
+        "\n"
+        "Also still work:\n"
+        "  rex check / asm / elf / inspect / disasm / ir / recompile / decompile / version\n"
+        "  rex disasm --cfg <elf>\n"
+        "  rex disasm --function F <elf>\n"
+        "  rex ir [--function F] <elf>\n"
+        "\n"
+        "Tips: -o is optional. Names like look/show/rebuild/tosource are shortcuts.\n",
         REX_VERSION);
+}
+static void usage(void) {
+    print_help();
     exit(2);
 }
 
-static char *rt_path(void) {
-    const char *env = getenv("REX_RUNTIME");
-    if (env && *env) return xstrdup(env);
-    static char buf[512];
-    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (n > 0) {
-        buf[n] = 0;
-        char *slash = strrchr(buf, '/');
-        if (slash) {
-            slash[1] = 0;
-            char *p = malloc(strlen(buf) + 16);
-            if (!p) die("out of memory");
-            sprintf(p, "%srexrt.c", buf);
-            if (access(p, R_OK) == 0) return p;
-            free(p);
-        }
-    }
-    snprintf(buf, sizeof(buf), "%s/share/rex/rexrt.c", REX_PREFIX);
-    if (access(buf, R_OK) == 0) return xstrdup(buf);
-    if (access("src/rexrt.c", R_OK) == 0) return xstrdup("src/rexrt.c");
-    if (access("rexrt.c", R_OK) == 0) return xstrdup("rexrt.c");
-    die("runtime not found (looked in $REX_RUNTIME, beside the binary, %s/share/rex/rexrt.c, src/rexrt.c)", REX_PREFIX);
-    return NULL;
-}
 
 int rex_write_elf(const char *asm_text, const char *outpath);
 
@@ -2437,8 +2408,19 @@ int rex_cmd_ir(const char *path, const char *fname);
 int rex_recompile(const char *in, const char *out, int debug);
 int rex_decompile(const char *in, const char *out, int verbose);
 
+static const char *alias_cmd(const char *c) {
+    if (!strcmp(c, "look")) return "inspect";
+    if (!strcmp(c, "show")) return "disasm";
+    if (!strcmp(c, "rebuild")) return "recompile";
+    if (!strcmp(c, "tosource") || !strcmp(c, "undo")) return "decompile";
+    if (!strcmp(c, "help") || !strcmp(c, "-h") || !strcmp(c, "--help")) return "help";
+    return c;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) usage();
+    argv[1] = (char *)alias_cmd(argv[1]);
+    if (!strcmp(argv[1], "help")) { print_help(); return 0; }
     if (strcmp(argv[1], "inspect") == 0) {
         if (argc < 3) usage();
         return rex_cmd_inspect(argv[2]);
@@ -2502,10 +2484,13 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (strcmp(argv[1], "build") == 0) {
-        if (argc < 3) usage();
-        const char *out = "a.out";
-        if (argc >= 5 && strcmp(argv[3], "-o") == 0) out = argv[4];
-        compile_to(argv[2], out);
+        const char *in = NULL, *out = "a.out";
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
+            else in = argv[i];
+        }
+        if (!in) { fprintf(stderr, "rex: build needs a .rex file\n"); return 2; }
+        compile_to(in, out);
         return 0;
     }
     if (strcmp(argv[1], "run") == 0) {
@@ -2534,6 +2519,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "rex: program did not exit normally\n");
         return 1;
     }
-    usage();
+    fprintf(stderr, "rex: unknown command '%s' (try rex help)\n", argv[1]);
     return 2;
 }

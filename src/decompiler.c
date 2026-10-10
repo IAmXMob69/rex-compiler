@@ -188,14 +188,6 @@ static const char *cop(IrCond c) {
     default: return "?";
     }
 }
-static IrCond invert(IrCond c) {
-    switch (c) {
-    case IR_CC_EQ: return IR_CC_NE; case IR_CC_NE: return IR_CC_EQ;
-    case IR_CC_LT: return IR_CC_GE; case IR_CC_GE: return IR_CC_LT;
-    case IR_CC_LE: return IR_CC_GT; case IR_CC_GT: return IR_CC_LE;
-    default: return c;
-    }
-}
 
 static void classify(D *d) {
     for (int i = 0; i < d->nfun; i++) {
@@ -493,7 +485,6 @@ static int find_join(const IrFunc *f, int a, int b) {
     return -1;
 }
 
-static void walk(D *d, const IrFunc *f, int bi, int until, int depth, int *seen);
 
 static Ex br_cond(D *d, const IrInsn *br, const IrBlock *b) {
     /* Prefer setcc result compared to 0:  setcc; zext; cmp x,0; br.eq -> if (!setcc) */

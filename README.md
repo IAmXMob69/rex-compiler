@@ -10,6 +10,23 @@ It is for Arch Linux. It also has a few XFCE files so Mousepad can color the cod
 
 `examples/rexcomp.rex` is a smaller compiler written in REX. The C compiler builds it. That program compiles its own source, and the assembly matches. The compiler produced by that compile still prints 42 for `examples/stage.rex`. That is a fixed point of the subset compiler. It is not a self-host of `src/rex.c`.
 
+## Commands
+
+Everyday names (shortcuts):
+
+| Command | Means |
+|---------|--------|
+| `rex run file.rex` | compile and run |
+| `rex build file.rex` | make a binary (`-o` optional, default `a.out`) |
+| `rex look elf` | peek at ELF headers (`inspect`) |
+| `rex show elf` | disassemble (`disasm`) |
+| `rex rebuild elf` | recompile from IR (`recompile`) |
+| `rex tosource elf` / `rex undo elf` | recover `.rex` (`decompile`) |
+| `rex help` | plain help |
+
+All older command names still work.
+
+
 ## Features
 
 - Compiler: `.rex` → AST → AT&T text → built-in assembler → ELF64. No gcc, no `as`, no libc in the output.
