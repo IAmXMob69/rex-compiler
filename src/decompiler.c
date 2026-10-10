@@ -151,6 +151,12 @@ typedef struct {
     char name[16];
     int arg;        /* 0..5, or -1 */
     int hint;       /* 0 none, 1 array, 2 pointer — recovery hints only */
+    int alen;       /* array length proven by a bounds check, 0 unknown */
+    int sid;        /* struct id (1-based) when this slot is a struct base */
+    int nfield;     /* struct field count */
+    int ptr_sid;    /* struct a pointer slot points at */
+    int hidden;     /* cell of an aggregate: not declared on its own */
+    char alias[48]; /* scalar spelling for aggregate cells: t1[2], t1.f8 */
 } Slot;
 
 typedef struct {
@@ -177,7 +183,10 @@ typedef struct {
     Fun *cur;
     const IrInsn *cmp;
     unsigned char declared[MAX_LOC];
-    int flat;           /* no control flow emitted yet at function level */
+    unsigned char written[MAX_LOC];
+    int flat;
+    int bound;          /* array length proven for the block being emitted */
+    int nstruct;           /* no control flow emitted yet at function level */
 } D;
 
 static const int ARG[6] = { 7, 6, 2, 1, 8, 9 };
@@ -209,7 +218,12 @@ static void push(D *d, Ex v) {
 static Ex pop(D *d) { return d->nstk ? d->stk[--d->nstk] : ex("?"); }
 
 static const char *slot_name(Fun *f, int off) {
-    for (int i = 0; i < f->nslots; i++) if (f->slots[i].off == off) return f->slots[i].name;
+    for (int i = 0; i < f->nslots; i++)
+        if (f->slots[i].off == off) return f->slots[i].alias[0] ? f->slots[i].alias : f->slots[i].name;
+    return NULL;
+}
+static Slot *slot_at(Fun *f, int off) {
+    for (int i = 0; i < f->nslots; i++) if (f->slots[i].off == off) return &f->slots[i];
     return NULL;
 }
 static void add_slot(Fun *f, int off, int arg) {
@@ -246,7 +260,9 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
         if (k < d->nstk) return ex(d->stk[d->nstk - 1 - k].s);
     }
     if (o->base == 5 && o->index != IR_NOREG) {
-        const char *base = slot_name(d->cur, (int)o->disp);
+        Slot *bs = slot_at(d->cur, (int)o->disp);
+        const char *base = bs ? bs->name : NULL;
+        if (bs && d->bound > bs->alen) bs->alen = d->bound;
         Ex ix = getr(d, o->index);
         long long v;
         char *i = NULL;
@@ -264,6 +280,19 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
         ex_free(ix);
         if (base) slot_hint(d->cur, (int)o->disp, 1);
     }
+    if (o->base != 5 && o->base != IR_NOREG && o->index == IR_NOREG && o->disp <= 0 && o->disp % 8 == 0 && d->has[o->base]) {
+        for (int i = 0; i < d->cur->nslots; i++) {
+            Slot *ps = &d->cur->slots[i];
+            if (!ps->ptr_sid || strcmp(ps->name, d->reg[o->base].s)) continue;
+            for (int j = 0; j < d->cur->nslots; j++)
+                if (d->cur->slots[j].sid == ps->ptr_sid && -o->disp / 8 < d->cur->slots[j].nfield)
+                    return exf("%s->f%lld", ps->name, (long long)-o->disp);
+        }
+    }
+    if (o->base != 5 && o->base != IR_NOREG && d->has[o->base])
+        for (int i = 0; i < d->cur->nslots; i++)
+            if (!strcmp(d->cur->slots[i].name, d->reg[o->base].s) && !d->cur->slots[i].alias[0])
+                slot_hint(d->cur, d->cur->slots[i].off, 2);
     Ex b = o->base == 5 ? ex("fp") : (o->base != IR_NOREG ? getr(d, o->base) : ex("0"));
     if (o->index != IR_NOREG) {
         Ex ix = getr(d, o->index);
@@ -473,6 +502,22 @@ static int is_epilog(const IrInsn *in) {
     return 0;
 }
 
+/* Aggregate (array / struct) base slot index covering slot si, or -1. */
+static int agg_base(Fun *f, int si) {
+    Slot *s = &f->slots[si];
+    for (int i = 0; i < f->nslots; i++) {
+        Slot *b = &f->slots[i];
+        int n = b->alen > 0 && b->hint == 1 ? b->alen : b->sid ? b->nfield : 0;
+        if (n && s->off <= b->off && s->off > b->off - 8 * n && (b->off - s->off) % 8 == 0) return i;
+    }
+    return -1;
+}
+static void decl_agg(D *d, int bi, int depth) {
+    Slot *b = &d->cur->slots[bi];
+    if (b->sid) emit(d, depth, "let %s = S%d; // hint: struct, fields named by byte offset", b->name, b->sid);
+    else emit(d, depth, "let %s[%d]; // hint: array, length from the bounds check", b->name, b->alen);
+}
+
 static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     if (is_prolog(in) || is_epilog(in)) return;
     switch (in->op) {
@@ -495,9 +540,25 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         if (in->dst.kind == IR_O_MEM && in->dst.base == 5 && in->dst.index == IR_NOREG)
             for (int i = 0; i < d->cur->nslots; i++)
                 if (d->cur->slots[i].off == (int)in->dst.disp && d->cur->slots[i].arg < 0) si = i;
-        if (si >= 0 && !d->declared[si] && d->flat && depth == 1) {
+        int agg = si >= 0 ? agg_base(d->cur, si) : -1;
+        if (agg >= 0 && !d->written[si] && !strcmp(src.s, "0") && in->a.kind == IR_O_IMM) {
+            /* zero-init of an aggregate cell: part of its declaration */
+            d->written[si] = 1;
+            if (!d->declared[agg]) { d->declared[agg] = 1; decl_agg(d, agg, depth); }
+        } else if (agg >= 0) {
+            d->written[si] = 1;
+            if (!d->declared[agg]) { d->declared[agg] = 1; decl_agg(d, agg, depth); }
+            emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
+        } else if (si >= 0 && !d->declared[si] && d->flat && depth == 1) {
             d->declared[si] = 1;
-            emit(d, depth, "let %s = %s;", dst.s, bare(src.s, bb, sizeof bb));
+            Slot *sl = &d->cur->slots[si];
+            if (!sl->ptr_sid && !strncmp(src.s, "&", 1)) {
+                Slot *tg = NULL;
+                for (int i = 0; i < d->cur->nslots; i++) if (!strcmp(d->cur->slots[i].name, src.s + 1)) tg = &d->cur->slots[i];
+                if (tg && tg->sid) sl->ptr_sid = tg->sid;
+            }
+            emit(d, depth, "let %s = %s;%s", dst.s, bare(src.s, bb, sizeof bb),
+                 sl->ptr_sid ? " // hint: pointer to struct" : sl->hint == 2 ? " // hint: pointer" : "");
         } else if (strcmp(dst.s, src.s))
             emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
         ex_free(dst); ex_free(src);
@@ -507,7 +568,10 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         if (in->dst.kind == IR_O_REG) {
             if (in->a.kind == IR_O_MEM && in->a.base == IR_NOREG && in->a.index == IR_NOREG)
                 setr(d, in->dst.reg, exf("%lld", (long long)in->a.disp));  /* absolute address as number */
-            else {
+            else if (in->a.kind == IR_O_MEM && in->a.base == 5 && in->a.index == IR_NOREG &&
+                     slot_at(d->cur, (int)in->a.disp) && slot_at(d->cur, (int)in->a.disp)->alias[0]) {
+                setr(d, in->dst.reg, exf("&%s", slot_at(d->cur, (int)in->a.disp)->name));
+            } else {
                 Ex m = mem_ex(d, &in->a);
                 if (m.s[0] == '*') {
                     Ex r = exf("&%s", m.s[1] == '(' ? m.s + 2 : m.s + 1);
@@ -1054,9 +1118,11 @@ static void flush_decls(D *d) {
     if (!d->flat) return;
     d->flat = 0;
     for (int i = 0; i < d->cur->nslots; i++)
-        if (d->cur->slots[i].arg < 0 && !d->declared[i]) {
+        if (d->cur->slots[i].arg < 0 && !d->declared[i] && !d->cur->slots[i].hidden) {
             d->declared[i] = 1;
-            emit(d, 1, "let %s = 0;", d->cur->slots[i].name);
+            if (d->cur->slots[i].alias[0]) { decl_agg(d, i, 1); continue; }
+            emit(d, 1, "let %s = 0;%s", d->cur->slots[i].name,
+                 d->cur->slots[i].hint == 2 ? " // hint: pointer" : "");
         }
 }
 static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx *lc, int depth, int enter);
@@ -1249,6 +1315,7 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
             }
         }
         enter = 0;
+        d->bound = g->bound[bi];
         const IrBlock *b = &f->blocks[bi];
         const IrInsn *term = b->ninsns ? &b->insns[b->ninsns - 1] : NULL;
         int nbody = term && ir_is_terminator(term->op) ? b->ninsns - 1 : b->ninsns;
@@ -1317,15 +1384,61 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
     }
 }
 
+/* After the discarded pass: arrays (indexed + bounds-checked) and structs
+ * (runs of zero-initialized adjacent locals, never indexed) get aliases.
+ * Struct declarations print before the function. */
+static void finish_hints(D *d, const IrFunc *f, Fun *fi) {
+    for (int i = 0; i < fi->nslots; i++) {
+        Slot *b = &fi->slots[i];
+        if (b->hint != 1 || b->alen < 2) continue;
+        snprintf(b->alias, sizeof b->alias, "%s[0]", b->name);
+        for (int k = 1; k < b->alen; k++) {
+            Slot *c = slot_at(fi, b->off - 8 * k);
+            if (!c || c->arg >= 0) continue;
+            c->hidden = 1;
+            snprintf(c->alias, sizeof c->alias, "%s[%d]", b->name, k);
+        }
+    }
+    if (!f->nblocks) return;
+    const IrBlock *b0 = &f->blocks[0];
+    for (int k = 0; k < b0->ninsns; k++) {
+        int run = 0, off0 = 0;
+        while (k + run < b0->ninsns) {
+            const IrInsn *in = &b0->insns[k + run];
+            if (in->op != IR_STORE || in->a.kind != IR_O_IMM || in->a.imm != 0 || in->dst.kind != IR_O_MEM ||
+                in->dst.base != 5 || in->dst.index != IR_NOREG) break;
+            if (run == 0) off0 = (int)in->dst.disp;
+            else if ((int)in->dst.disp != off0 - 8 * run) break;
+            run++;
+        }
+        if (run >= 2) {
+            Slot *base = slot_at(fi, off0);
+            int ok = base && base->hint == 0 && base->arg < 0 && !base->hidden;
+            for (int j = 1; ok && j < run; j++) { Slot *c = slot_at(fi, off0 - 8 * j); if (!c || c->hint || c->hidden || c->arg >= 0) ok = 0; }
+            if (ok) {
+                base->sid = ++d->nstruct;
+                base->nfield = run;
+                fprintf(d->out, "struct S%d {", base->sid);
+                for (int j = 0; j < run; j++) fprintf(d->out, " f%d;", 8 * j);
+                fprintf(d->out, " } // hint: recovered struct\n\n");
+                snprintf(base->alias, sizeof base->alias, "%s.f0", base->name);
+                for (int j = 1; j < run; j++) {
+                    Slot *c = slot_at(fi, off0 - 8 * j);
+                    c->hidden = 1;
+                    snprintf(c->alias, sizeof c->alias, "%s.f%d", base->name, 8 * j);
+                }
+            }
+            k += run - 1;
+        }
+    }
+}
+
 static void decompile_fun(D *d, Fun *fi) {
     if (fi->kind == 1 || fi->kind == 3) return;
     const IrFunc *f = NULL;
     for (int i = 0; i < d->m->nfuncs; i++) if (d->m->funcs[i].addr == fi->addr) { f = &d->m->funcs[i]; break; }
     if (!f) return;
 
-    fprintf(d->out, "fn %s(", fi->name);
-    for (int a = 0; a < fi->nargs; a++) fprintf(d->out, "%s%c", a ? ", " : "", 'a' + a);
-    fprintf(d->out, ") {\n");
     /* reset env */
     for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
     while (d->nstk) ex_free(d->stk[--d->nstk]);
@@ -1350,9 +1463,19 @@ static void decompile_fun(D *d, Fun *fi) {
                 structure(d, f, &g, 0, -1, NULL, 1, 0);
                 fclose(m); free(buf);
                 d->out = save;
-            } else structure(d, f, &g, 0, -1, NULL, 1, 0);
+                finish_hints(d, f, fi);
+                fprintf(d->out, "fn %s(", fi->name);
+                for (int a = 0; a < fi->nargs; a++) fprintf(d->out, "%s%c", a ? ", " : "", 'a' + a);
+                fprintf(d->out, ") {\n");
+            } else {
+                memset(d->written, 0, sizeof d->written);
+                structure(d, f, &g, 0, -1, NULL, 1, 0);
+            }
         }
-    } else emit(d, 1, "// E600: could not build the control-flow graph for this function");
+    } else {
+        fprintf(d->out, "fn %s() {\n", fi->name);
+        emit(d, 1, "// E600: could not build the control-flow graph for this function");
+    }
     g_free(&g);
     fprintf(d->out, "}\n\n");
 }
