@@ -100,12 +100,12 @@ Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex
 | E302 | lift | idiv / div shape |
 | E400 | CFG | recovery failed |
 | E401 | CFG | indirect jump (reserved; today the block just ends) |
-| E402 | CFG / decompile | irreducible control flow in main |
+| E402 | CFG / decompile | irreducible control flow in main (hard failure); in other functions, nesting too deep to structure prints an `// E402` comment at that point |
 | E403 | CFG | address outside executable code |
 | E500 | recompile | encode / layout failure |
 | E501 | recompile | `--verify` / `--ir` mismatch |
 | E502 | recompile | PE rebuild failed / not clean |
-| E600 | decompile | recovery failure |
+| E600 | decompile | recovery failure (also printed as a comment when a function's CFG cannot be built) |
 | E601 | decompile | `--verify` mismatch |
 
 No silent partial output: a failure returns the code and prints the message. `--verify` on `recompile` / `decompile` runs both sides with no args and compares exit status plus combined stdout/stderr. `compare --ir` / `match --ir` also lift both sides and compare a normalized dump of `main` (identity `mov`, call return addresses, and rip displacements are stripped).
@@ -180,7 +180,7 @@ Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` outpu
 ## Roadmap (tool)
 
 1. Real PE section and import parsing; then PE → the same IR subset.
-2. Reducible-graph structuring (dominators → if/else/while) when no REX pattern matches; `.eh_frame` seeds. Keep the REX path as the high-quality case.
+2. Done: dominator/postdominator structuring (while, do-while, while(1) + break/continue, if/else, REX switch), array/struct/pointer hints, `make bench-decompile`, golden tests. Measured on the benchmark corpus: REX examples `match` 29/43 and `match --ir` 26/43 (was 20 and 13); gcc/clang samples 0/36. Next: jump tables, `&&`/`||` chains and rotated loops from optimized compilers; `.eh_frame` seeds. Keep the REX path as the high-quality case.
 3. PIE, shared objects, relocations.
 4. Mach-O, ARM64, RISC-V — each behind the same loader registry.
 

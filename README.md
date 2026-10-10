@@ -258,13 +258,13 @@ Where it is not:
 
 ## Roadmap
 
-Done: ELF64 loader behind a registry, PE32+ x86-64 load + simple rebuild (`.rextext`), numbered failure codes (E1xx–E6xx), machine IR, x86 lift including `cmovcc`/`leave`/`endbr`/`hlt`/`cdqe`/`movsxd`/`xchg`, `compare`/`match --ir`, dominator check for irreducible CFG (`E402`), optional type hints in decompile, recompile and decompile for REX-shaped binaries, CFG recursive descent from entry + call targets + ELF symbols.
+Done: ELF64 loader behind a registry, PE32+ x86-64 load + simple rebuild (`.rextext`), numbered failure codes (E1xx–E6xx), machine IR, x86 lift including `cmovcc`/`leave`/`endbr`/`hlt`/`cdqe`/`movsxd`/`xchg`, `compare`/`match --ir`, dominator check for irreducible CFG (`E402`), decompiler structuring from dominators/postdominators (while, do-while, break/continue, if/else, REX switch) with `// hint:` arrays, structs and pointers, a quality benchmark (`make bench-decompile`) and golden decompile tests, recompile and decompile for REX-shaped binaries, CFG recursive descent from entry + call targets + ELF symbols.
 
 Next (no schedule):
 
 1. Real PE section/import parsing (then PE → IR for the same x86-64 subset).
 2. Fuller x86-64: SSE moves, more imul forms, string ops, `bt*`, `xchg`/`cmpxchg`, PIC/PLT calls, jump tables.
-3. Reducible-graph structuring (dominators → if/else/while) when no REX pattern matches; `.eh_frame` seeds.
+3. Structuring for optimized gcc/clang code: jump tables, `&&`/`||` chains, loop rotation; `.eh_frame` seeds. Today gcc/clang -O0..-O2 samples decompile but none pass `match` (benchmark: 0/36).
 4. PIE / shared objects / relocations.
 5. Later: Mach-O, ARM64, RISC-V.
 
