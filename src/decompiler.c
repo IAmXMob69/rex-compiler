@@ -20,7 +20,9 @@
  * - Names are invented (f1, a, b, t0...). Original names are gone.
  * - Calls through a register print the pointer expression, 2 args.
  * - cmov becomes (cond ? src : old). hlt/ud2 become IR_TRAP and are dropped.
- * - Nested structs, switch, and most pointer arithmetic stay opaque.
+ * - Structuring: natural loops (while / do-while / while(1) with break and
+ * continue), if/else at postdominators, REX switch chains. Nested structs
+ * and most pointer arithmetic stay opaque.
  * - Runtime helpers (print, putc, alloc, ...) are recognized by
  *   syscalls and are not emitted; calls to them become builtins.
  */
@@ -82,6 +84,13 @@ static int g_addr;
 static Ex ex_bin(const char *op, Ex a, Ex b) {
     long long x, y;
     int na = is_num(a.s, &x), nb = is_num(b.s, &y);
+    if (na && nb) {
+        int r = -1;
+        if (!strcmp(op, "==")) r = x == y; else if (!strcmp(op, "!=")) r = x != y;
+        else if (!strcmp(op, "<")) r = x < y;  else if (!strcmp(op, "<=")) r = x <= y;
+        else if (!strcmp(op, ">")) r = x > y;  else if (!strcmp(op, ">=")) r = x >= y;
+        if (r >= 0) { ex_free(a); ex_free(b); return exf("%d", r); }
+    }
     if (g_addr && nb && y == 0 && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "|") ||
                          !strcmp(op, "^") || !strcmp(op, "<<") || !strcmp(op, ">>"))) { ex_free(b); return a; }
     if (g_addr && na && x == 0 && (!strcmp(op, "+") || !strcmp(op, "|"))) { ex_free(a); return b; }
@@ -167,6 +176,8 @@ typedef struct {
     int nstk, cstk;
     Fun *cur;
     const IrInsn *cmp;
+    unsigned char declared[MAX_LOC];
+    int flat;           /* no control flow emitted yet at function level */
 } D;
 
 static const int ARG[6] = { 7, 6, 2, 1, 8, 9 };
@@ -179,6 +190,9 @@ static Fun *fby(D *d, uint64_t a) {
 static void setr(D *d, int r, Ex v) {
     if (r < 0 || r > 15) { ex_free(v); return; }
     if (d->has[r]) ex_free(d->reg[r]);
+    /* Runaway expressions (register recurrences in optimized code) become
+     * an explicit raw register instead of growing without bound. */
+    if (strlen(v.s) > 400) { ex_free(v); v = exf("r%d", r); }
     d->reg[r] = v; d->has[r] = 1;
 }
 static Ex getr(D *d, int r) {
@@ -218,7 +232,7 @@ static char *neg8_index(const char *ix) {
     long long v;
     if (is_num(ix, &v)) return NULL; /* numeric handled by caller */
     size_t n = strlen(ix);
-    if (n > 10 && !strncmp(ix, "(-(", 3) && !strcmp(ix + n - 6, " * 8))")) return strndup(ix + 3, n - 9);
+    if (n >= 10 && !strncmp(ix, "(-(", 3) && !strcmp(ix + n - 6, " * 8))")) return strndup(ix + 3, n - 9);
     return NULL;
 }
 static Ex mem_ex_(D *d, const IrOperand *o) {
@@ -477,7 +491,15 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     case IR_STORE: {
         Ex dst = op_ex(d, &in->dst), src = op_ex(d, &in->a);
         char bb[1024];
-        emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
+        int si = -1;
+        if (in->dst.kind == IR_O_MEM && in->dst.base == 5 && in->dst.index == IR_NOREG)
+            for (int i = 0; i < d->cur->nslots; i++)
+                if (d->cur->slots[i].off == (int)in->dst.disp && d->cur->slots[i].arg < 0) si = i;
+        if (si >= 0 && !d->declared[si] && d->flat && depth == 1) {
+            d->declared[si] = 1;
+            emit(d, depth, "let %s = %s;", dst.s, bare(src.s, bb, sizeof bb));
+        } else if (strcmp(dst.s, src.s))
+            emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
         ex_free(dst); ex_free(src);
         break;
     }
@@ -603,43 +625,6 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     default: break;
     }
 }
-
-/* Returns join block, or -1. */
-static int is_ret_block(const IrFunc *f, int bi) {
-    if (bi < 0 || bi >= f->nblocks) return 0;
-    const IrBlock *b = &f->blocks[bi];
-    if (!b->ninsns) return 0;
-    for (int k = 0; k < b->ninsns - 1; k++)
-        if (!is_epilog(&b->insns[k]) && b->insns[k].op != IR_NOP) return 0;
-    return b->insns[b->ninsns - 1].op == IR_RET;
-}
-static int falls_through(const IrInsn *t) {
-    return !t || (t->op != IR_JMP && t->op != IR_BR && t->op != IR_RET && t->op != IR_TRAP);
-}
-static int find_join(const IrFunc *f, int a, int b) {
-    if (a < 0 || b < 0 || a >= f->nblocks || b >= f->nblocks) return -1;
-    const IrInsn *ta = f->blocks[a].ninsns ? &f->blocks[a].insns[f->blocks[a].ninsns - 1] : NULL;
-    const IrInsn *tb = f->blocks[b].ninsns ? &f->blocks[b].insns[f->blocks[b].ninsns - 1] : NULL;
-    if (ta && ta->op == IR_RET && tb && tb->op == IR_RET) return -2;
-    if (is_ret_block(f, a) && is_ret_block(f, b)) return -2;
-    if (ta && ta->op == IR_JMP && tb && tb->op == IR_JMP && ta->a.block == tb->a.block) {
-        if (is_ret_block(f, ta->a.block)) return -2;
-        return ta->a.block;
-    }
-    /* One arm jumps to J, the other falls through into J. */
-    if (ta && ta->op == IR_JMP && falls_through(tb) && b + 1 == ta->a.block) {
-        if (is_ret_block(f, ta->a.block)) return -2;
-        return ta->a.block;
-    }
-    if (tb && tb->op == IR_JMP && falls_through(ta) && a + 1 == tb->a.block) {
-        if (is_ret_block(f, tb->a.block)) return -2;
-        return tb->a.block;
-    }
-    if (tb && tb->op == IR_JMP && tb->a.block == a) return is_ret_block(f, a) ? -2 : a;
-    if (ta && ta->op == IR_JMP && ta->a.block == b) return is_ret_block(f, b) ? -2 : b;
-    return -1;
-}
-
 
 static Ex br_cond(D *d, const IrInsn *br, const IrBlock *b) {
     /* Prefer setcc result compared to 0:  setcc; zext; cmp x,0; br.eq -> if (!setcc) */
@@ -772,137 +757,563 @@ static int cfg_irreducible(const IrFunc *f, const int *idom) {
     return bad;
 }
 
-/* Cleaner while handling: second pass over BR that looks like a loop header. */
-static int is_loop_header(const IrFunc *f, int bi) {
-    /* A back-edge comes from a later block (or the block itself). Forward
-     * branches that land on bi do not make it a loop header. */
-    for (int bb = bi; bb < f->nblocks; bb++) {
-        const IrInsn *t = f->blocks[bb].ninsns ? &f->blocks[bb].insns[f->blocks[bb].ninsns - 1] : NULL;
-        if (!t) continue;
-        if (t->op == IR_JMP && t->a.block == bi) return 1;
-        if (t->op == IR_BR && bb != bi && (t->a.block == bi || t->b.block == bi)) return 1;
+/* ---- Structuring ----
+ * Effective CFG: edges into runtime fail blocks (bounds / div-zero checks
+ * that call a runtime helper with a constant message) are dropped, so a
+ * check becomes straight-line code. Loops come from back edges u->h where
+ * h dominates u (natural loops). if/else joins are immediate
+ * postdominators. Irreducible main is refused earlier with E402.
+ */
+typedef struct {
+    int n;
+    int (*succ)[2];
+    int *nsucc;
+    int *idom, *ipdom;      /* ipdom: n means "function exit" */
+    unsigned char *fail;
+    int *loop_exit;         /* per header: exit block, -1 none; -2 not a header */
+    unsigned char *inloop;  /* n*n: inloop[h*n+b] */
+    int *bound;             /* per block: array length proven by a dropped check, 0 none */
+} G;
+
+static int is_fail_block(D *d, const IrFunc *f, int bi) {
+    const IrBlock *tb = &f->blocks[bi];
+    int saw_fail = 0;
+    for (int k = 0; k < tb->ninsns; k++) {
+        const IrInsn *in = &tb->insns[k];
+        if (is_prolog(in) || is_epilog(in) || in->op == IR_NOP || in->op == IR_TRAP) continue;
+        if (in->op == IR_JMP || in->op == IR_RET) continue;
+        if (in->op == IR_ADDR || in->op == IR_ZEXT || in->op == IR_SEXT) continue;
+        if (in->op == IR_ADD || in->op == IR_SUB) {
+            if (in->dst.kind == IR_O_REG && in->dst.reg == 4) continue; /* stack alignment */
+            return 0;
+        }
+        if (in->op == IR_MOV && in->a.kind != IR_O_IMM) return 0;
+        if (in->op == IR_MOV) continue;
+        if (in->op == IR_CALL && in->a.kind == IR_O_ADDR) {
+            Fun *t = fby(d, in->a.addr);
+            if (!t || t->kind == 3) { saw_fail = 1; continue; }
+        }
+        return 0;
+    }
+    /* Constant message argument: addr rdi,[abs] */
+    int msg = 0;
+    for (int k = 0; k < tb->ninsns; k++)
+        if (tb->insns[k].op == IR_ADDR && tb->insns[k].dst.kind == IR_O_REG && tb->insns[k].dst.reg == 7 &&
+            tb->insns[k].a.base == IR_NOREG) msg = 1;
+    return saw_fail && msg;
+}
+
+static int *dom_tree(int n, int entry, int (*succ)[2], const int *nsucc) {
+    int *rpo = malloc((size_t)n * sizeof(int)), *order = malloc((size_t)n * sizeof(int));
+    int *st = malloc((size_t)n * 2 * sizeof(int)), *seen = calloc((size_t)n, sizeof(int));
+    int *idom = malloc((size_t)n * sizeof(int));
+    int *npred = calloc((size_t)n, sizeof(int)), *pred = malloc((size_t)n * (size_t)n * sizeof(int) + sizeof(int));
+    if (!rpo || !order || !st || !seen || !idom || !npred || !pred) {
+        free(rpo); free(order); free(st); free(seen); free(idom); free(npred); free(pred); return NULL;
+    }
+    for (int b = 0; b < n; b++) for (int s = 0; s < nsucc[b]; s++) { int v = succ[b][s]; pred[v * n + npred[v]++] = b; }
+    /* iterative postorder */
+    int cnt = 0, sp = 0;
+    int *it = calloc((size_t)n, sizeof(int));
+    st[sp++] = entry; seen[entry] = 1;
+    while (sp) {
+        int b = st[sp - 1];
+        if (it[b] < nsucc[b]) {
+            int v = succ[b][it[b]++];
+            if (!seen[v]) { seen[v] = 1; st[sp++] = v; }
+        } else { order[cnt++] = b; sp--; }
+    }
+    free(it);
+    for (int i = 0; i < n; i++) rpo[i] = -1;
+    for (int i = 0; i < cnt; i++) rpo[order[i]] = cnt - 1 - i;  /* rpo number */
+    for (int i = 0; i < n; i++) idom[i] = -1;
+    idom[entry] = entry;
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (int i = cnt - 1; i >= 0; i--) {
+            int b = order[i];
+            if (b == entry) continue;
+            int ni = -1;
+            for (int k = 0; k < npred[b]; k++) {
+                int p = pred[b * n + k];
+                if (idom[p] < 0) continue;
+                if (ni < 0) { ni = p; continue; }
+                int x = p, y = ni;
+                while (x != y) {
+                    while (rpo[x] > rpo[y]) x = idom[x];
+                    while (rpo[y] > rpo[x]) y = idom[y];
+                }
+                ni = x;
+            }
+            if (ni >= 0 && idom[b] != ni) { idom[b] = ni; changed = 1; }
+        }
+    }
+    free(rpo); free(order); free(st); free(seen); free(npred); free(pred);
+    return idom;
+}
+
+static int g_dominates(const G *g, int a, int b) {
+    for (int guard = 0; guard <= g->n; guard++) {
+        if (b == a) return 1;
+        if (b < 0 || g->idom[b] == b || g->idom[b] < 0) return 0;
+        b = g->idom[b];
     }
     return 0;
 }
 
-static void walk2(D *d, const IrFunc *f, int bi, int until, int depth, int *seen) {
-    while (bi >= 0 && bi < f->nblocks && bi != until && !seen[bi]) {
-        seen[bi] = 1;
+static void g_free(G *g) {
+    free(g->succ); free(g->nsucc); free(g->idom); free(g->ipdom); free(g->fail);
+    free(g->loop_exit); free(g->inloop); free(g->bound);
+}
+
+static const IrInsn *last_cmp(const IrBlock *b) {
+    for (int j = b->ninsns - 2; j >= 0; j--)
+        if (b->insns[j].op == IR_CMP || b->insns[j].op == IR_TEST) return &b->insns[j];
+    return NULL;
+}
+
+/* Follow blocks that hold nothing but an unconditional jump. */
+static int thread(const IrFunc *f, int b) {
+    for (int guard = 0; guard < f->nblocks && b >= 0 && b < f->nblocks; guard++) {
+        const IrBlock *bl = &f->blocks[b];
+        if (bl->ninsns != 1 || bl->insns[0].op != IR_JMP || bl->insns[0].a.kind != IR_O_BLOCK) break;
+        if (bl->insns[0].a.block == b) break;
+        b = bl->insns[0].a.block;
+    }
+    return b;
+}
+
+static int g_build(D *d, const IrFunc *f, G *g) {
+    int n = f->nblocks;
+    memset(g, 0, sizeof(*g));
+    g->n = n;
+    g->succ = calloc((size_t)n + 1, sizeof(*g->succ));
+    g->nsucc = calloc((size_t)n + 1, sizeof(int));
+    g->fail = calloc((size_t)n, 1);
+    g->loop_exit = malloc((size_t)n * sizeof(int));
+    g->inloop = calloc((size_t)n * (size_t)n, 1);
+    g->bound = calloc((size_t)n, sizeof(int));
+    if (!g->succ || !g->nsucc || !g->fail || !g->loop_exit || !g->inloop || !g->bound) return -1;
+    for (int b = 0; b < n; b++) g->fail[b] = (unsigned char)is_fail_block(d, f, b);
+    for (int b = 0; b < n; b++) {
+        const IrBlock *bl = &f->blocks[b];
+        const IrInsn *t = bl->ninsns ? &bl->insns[bl->ninsns - 1] : NULL;
+        int s[2], ns = 0;
+        if (g->fail[b]) { g->nsucc[b] = 0; continue; }
+        if (t && t->op == IR_RET) ns = 0;
+        else if (t && t->op == IR_TRAP) ns = 0;
+        else if (t && t->op == IR_JMP) { if (t->a.kind == IR_O_BLOCK) s[ns++] = t->a.block; }
+        else if (t && t->op == IR_BR) {
+            int a = t->a.block, c = t->b.block;
+            if (!g->fail[a]) s[ns++] = a;
+            if (!g->fail[c] && c != a) s[ns++] = c;
+            if (ns == 1 && (g->fail[a] || g->fail[c])) {
+                const IrInsn *cmp = last_cmp(bl);
+                if (cmp && cmp->op == IR_CMP && cmp->b.kind == IR_O_IMM && cmp->b.imm > 0) g->bound[s[0]] = (int)cmp->b.imm;
+            }
+        } else for (int k = 0; k < bl->nsucc && k < 2; k++) s[ns++] = bl->succ[k];
+        for (int k = 0; k < ns; k++) s[k] = thread(f, s[k]);
+        if (ns == 2 && s[0] == s[1]) ns = 1;
+        for (int k = 0; k < ns; k++) g->succ[b][k] = s[k];
+        g->nsucc[b] = ns;
+    }
+    g->idom = dom_tree(n, 0, g->succ, g->nsucc);
+    /* Postdominators: reverse graph with virtual exit n. */
+    int (*rs)[2] = calloc((size_t)n + 1, sizeof(*rs));
+    int *rns = calloc((size_t)n + 1, sizeof(int));
+    int *rcap = calloc((size_t)n + 1, sizeof(int));
+    int ok = rs && rns && rcap;
+    /* reverse edges can exceed 2 per node; collapse: use a dense list */
+    int *radj = ok ? calloc((size_t)(n + 1) * (size_t)(n + 1), sizeof(int)) : NULL;
+    if (ok && radj) {
+        for (int b = 0; b < n; b++) {
+            if (g->nsucc[b] == 0) radj[n * (n + 1) + rcap[n]++] = b;
+            for (int k = 0; k < g->nsucc[b]; k++) { int v = g->succ[b][k]; radj[v * (n + 1) + rcap[v]++] = b; }
+        }
+        /* Postdominator via simple iterative set intersection on bitsets (small n). */
+        int W = n + 1;
+        unsigned char *pd = malloc((size_t)W * (size_t)W);
+        if (pd) {
+            for (int b = 0; b < W; b++) memset(pd + (size_t)b * W, b == n ? 0 : 1, (size_t)W);
+            pd[(size_t)n * W + n] = 1;
+            int ch = 1;
+            while (ch) {
+                ch = 0;
+                for (int b = n - 1; b >= 0; b--) {
+                    unsigned char tmp[W];
+                    int any = 0;
+                    if (g->nsucc[b] == 0) { memcpy(tmp, pd + (size_t)n * W, (size_t)W); any = 1; }
+                    for (int k = 0; k < g->nsucc[b]; k++) {
+                        unsigned char *s = pd + (size_t)g->succ[b][k] * W;
+                        if (!any) { memcpy(tmp, s, (size_t)W); any = 1; }
+                        else for (int i = 0; i < W; i++) tmp[i] &= s[i];
+                    }
+                    if (!any) memset(tmp, 0, (size_t)W);
+                    tmp[b] = 1;
+                    if (memcmp(tmp, pd + (size_t)b * W, (size_t)W)) { memcpy(pd + (size_t)b * W, tmp, (size_t)W); ch = 1; }
+                }
+            }
+            g->ipdom = malloc((size_t)W * sizeof(int));
+            for (int b = 0; b < n && g->ipdom; b++) {
+                /* ipdom = strict postdominator p such that every other strict pdom of b also pdoms p */
+                int best = -1;
+                for (int p = 0; p < W; p++) {
+                    if (p == b || !pd[(size_t)b * W + p]) continue;
+                    int okp = 1;
+                    for (int q = 0; q < W; q++)
+                        if (q != b && q != p && pd[(size_t)b * W + q] && !pd[(size_t)p * W + q]) { okp = 0; break; }
+                    if (okp) { best = p; break; }
+                }
+                g->ipdom[b] = best;
+            }
+            free(pd);
+        }
+    }
+    free(radj); free(rs); free(rns); free(rcap);
+    if (!g->idom || !g->ipdom) return -1;
+    /* Natural loops. */
+    for (int h = 0; h < n; h++) g->loop_exit[h] = -2;
+    for (int u = 0; u < n; u++)
+        for (int k = 0; k < g->nsucc[u]; k++) {
+            int h = g->succ[u][k];
+            if (!g_dominates(g, h, u)) continue;
+            g->loop_exit[h] = -1;
+            unsigned char *in = g->inloop + (size_t)h * n;
+            int *st = malloc((size_t)n * sizeof(int)); int sp = 0;
+            if (!st) continue;
+            in[h] = 1;
+            if (!in[u]) { in[u] = 1; st[sp++] = u; }
+            while (sp) {
+                int x = st[--sp];
+                for (int y = 0; y < n; y++)
+                    for (int kk = 0; kk < g->nsucc[y]; kk++)
+                        if (g->succ[y][kk] == x && !in[y]) { in[y] = 1; st[sp++] = y; }
+            }
+            free(st);
+        }
+    for (int h = 0; h < n; h++) {
+        if (g->loop_exit[h] == -2) continue;
+        unsigned char *in = g->inloop + (size_t)h * n;
+        int ex = -1;
+        int ip = g->ipdom[h];
+        if (ip >= 0 && ip < n && !in[ip]) ex = ip;
+        for (int b = 0; b < n && ex < 0; b++) {
+            if (!in[b]) continue;
+            for (int k = 0; k < g->nsucc[b]; k++) if (!in[g->succ[b][k]]) { ex = g->succ[b][k]; break; }
+        }
+        g->loop_exit[h] = ex;
+    }
+    return 0;
+}
+
+typedef struct { int header, exit; } LCtx;
+
+typedef struct { Ex reg[16]; int has[16]; int nstk; } Snap;
+static void snap_take(D *d, Snap *s) {
+    for (int i = 0; i < 16; i++) { s->has[i] = d->has[i]; if (d->has[i]) s->reg[i] = ex(d->reg[i].s); }
+    s->nstk = d->nstk;
+}
+static void snap_restore(D *d, Snap *s, int keep) {
+    for (int i = 0; i < 16; i++) {
+        if (d->has[i]) ex_free(d->reg[i]);
+        d->has[i] = s->has[i];
+        if (s->has[i]) d->reg[i] = keep ? ex(s->reg[i].s) : s->reg[i];
+    }
+    while (d->nstk > s->nstk) ex_free(d->stk[--d->nstk]);
+}
+
+static int block_emits(const IrBlock *b) {
+    for (int k = 0; k < b->ninsns; k++) {
+        IrOp op = b->insns[k].op;
+        if (op == IR_STORE || op == IR_CALL || op == IR_SYSCALL) return 1;
+    }
+    return 0;
+}
+
+static void emit_ret(D *d, int depth) {
+    if (d->cur->kind != 2) {
+        char bb[1024];
+        if (d->has[0]) emit(d, depth, "return %s;", bare(d->reg[0].s, bb, sizeof bb));
+        else emit(d, depth, "return 0;");
+    }
+}
+
+static int g_budget;
+
+static int ret_only(const IrBlock *b) {
+    if (!b->ninsns || b->insns[b->ninsns - 1].op != IR_RET) return 0;
+    for (int k = 0; k < b->ninsns - 1; k++)
+        if (!is_epilog(&b->insns[k]) && b->insns[k].op != IR_NOP) return 0;
+    return 1;
+}
+
+/* Before the first control-flow statement, declare every local not yet
+ * declared by its first straight-line assignment. */
+static void flush_decls(D *d) {
+    if (!d->flat) return;
+    d->flat = 0;
+    for (int i = 0; i < d->cur->nslots; i++)
+        if (d->cur->slots[i].arg < 0 && !d->declared[i]) {
+            d->declared[i] = 1;
+            emit(d, 1, "let %s = 0;", d->cur->slots[i].name);
+        }
+}
+static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx *lc, int depth, int enter);
+
+/* Join for branches whose arms leave early: lowest-index block reachable
+ * from both arms (REX lays code out in source order). */
+static int common_reach(const IrFunc *f, G *g, int from, int a, int b, const LCtx *lc, int stop) {
+    (void)f;
+    int n = g->n;
+    unsigned char *ra = calloc((size_t)n, 1), *rb = calloc((size_t)n, 1);
+    int *st = malloc((size_t)n * sizeof(int));
+    int best = -1;
+    if (ra && rb && st) {
+        for (int side = 0; side < 2; side++) {
+            unsigned char *r = side ? rb : ra;
+            int sp = 0;
+            st[sp++] = side ? b : a; r[side ? b : a] = 1;
+            while (sp) {
+                int x = st[--sp];
+                if (x == stop || (lc && (x == lc->header || x == lc->exit))) continue;
+                for (int k = 0; k < g->nsucc[x]; k++) {
+                    int y = g->succ[x][k];
+                    if (y == from || r[y]) continue;
+                    r[y] = 1; st[sp++] = y;
+                }
+            }
+        }
+        for (int x = 0; x < n; x++)
+            if (ra[x] && rb[x] && !(lc && (x == lc->header || x == lc->exit))) { best = x; break; }
+    }
+    free(ra); free(rb); free(st);
+    return best;
+}
+
+/* do-while: the only back edge comes from a quiet block ending in
+ * br(header, exit). */
+static int find_latch(const IrFunc *f, G *g, int h) {
+    int latch = -1, nback = 0;
+    for (int u = 0; u < g->n; u++)
+        for (int k = 0; k < g->nsucc[u]; k++)
+            if (g->succ[u][k] == h && g_dominates(g, h, u)) { latch = u; nback++; }
+    if (nback != 1 || latch == h) return -1;
+    const IrBlock *lb = &f->blocks[latch];
+    if (!lb->ninsns || lb->insns[lb->ninsns - 1].op != IR_BR || g->nsucc[latch] != 2 || block_emits(lb)) return -1;
+    int other = g->succ[latch][0] == h ? g->succ[latch][1] : g->succ[latch][0];
+    if (other != g->loop_exit[h]) return -1;
+    return latch;
+}
+
+static char *arm_text(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx *lc, int depth) {
+    char *buf = NULL; size_t n = 0;
+    FILE *save = d->out, *m = open_memstream(&buf, &n);
+    if (!m) { structure(d, f, g, bi, stop, lc, depth, 0); return strdup(""); }
+    d->out = m;
+    structure(d, f, g, bi, stop, lc, depth, 0);
+    fclose(m);
+    d->out = save;
+    return buf ? buf : strdup("");
+}
+
+/* A block that only compares the switch value: load [rsp]; cmp r, K; br. */
+static int case_test(const IrBlock *b, long long *k, IrCond *cc, int head) {
+    if (b->ninsns < 2) return 0;
+    const IrInsn *br = &b->insns[b->ninsns - 1];
+    if (br->op != IR_BR || (br->cc != IR_CC_NE && br->cc != IR_CC_EQ)) return 0;
+    const IrInsn *cmp = &b->insns[b->ninsns - 2];
+    if (cmp->op != IR_CMP || cmp->b.kind != IR_O_IMM || cmp->b.imm < 0) return 0;
+    if (head) {
+        const IrInsn *ld = b->ninsns >= 3 ? &b->insns[b->ninsns - 3] : NULL;
+        if (!ld || ld->op != IR_LOAD || ld->a.kind != IR_O_MEM || ld->a.base != 4 || ld->a.disp != 0) return 0;
+        *k = cmp->b.imm; *cc = br->cc;
+        return 1;
+    }
+    for (int i = 0; i < b->ninsns - 2; i++) {
+        const IrInsn *in = &b->insns[i];
+        if (in->op == IR_LOAD && in->a.kind == IR_O_MEM && in->a.base == 4 && in->a.disp == 0 && in->a.index == IR_NOREG) continue;
+        if (in->op == IR_PUSH || in->op == IR_MOV || in->op == IR_LOAD || in->op == IR_POP) continue;
+        return 0;
+    }
+    int top = 0;
+    for (int i = 0; i < b->ninsns - 2; i++)
+        if (b->insns[i].op == IR_LOAD && b->insns[i].a.base == 4 && b->insns[i].a.disp == 0) top = 1;
+    if (!top) return 0;
+    *k = cmp->b.imm; *cc = br->cc;
+    return 1;
+}
+
+/* REX lowers switch to: push value; repeat { load [rsp]; cmp K; br.ne next, case }.
+ * All arms join at the block that pops the value. */
+static int try_switch(D *d, const IrFunc *f, G *g, int bi, const LCtx *lc, int depth) {
+    const IrBlock *b = &f->blocks[bi];
+    long long k; IrCond cc;
+    if (!case_test(b, &k, &cc, 1)) return 0;
+    int join = g->ipdom[bi];
+    if (join < 0 || join >= g->n) return 0;
+    long long keys[64]; int targets[64], nc = 0;
+    int cur = bi, deflt = -1;
+    while (nc < 64) {
+        const IrBlock *cb = &f->blocks[cur];
+        long long kk; IrCond c2;
+        if (cur != bi && (block_emits(cb) || !case_test(cb, &kk, &c2, 0))) { deflt = cur; break; }
+        if (cur == bi) { kk = k; c2 = cc; }
+        const IrInsn *br = &cb->insns[cb->ninsns - 1];
+        int eq = thread(f, c2 == IR_CC_EQ ? br->a.block : br->b.block);
+        int ne = thread(f, c2 == IR_CC_EQ ? br->b.block : br->a.block);
+        keys[nc] = kk; targets[nc] = eq; nc++;
+        if (ne == join) { deflt = -1; break; }
+        cur = ne;
+    }
+    /* switch value: top of the symbolic stack */
+    if (!d->nstk) return 0;
+    char bb[1024];
+    emit(d, depth, "switch (%s) {", bare(d->stk[d->nstk - 1].s, bb, sizeof bb));
+    for (int i = 0; i < nc; i++) {
+        Snap s; snap_take(d, &s);
+        char *a = arm_text(d, f, g, targets[i], join, lc, depth + 2);
+        snap_restore(d, &s, 0);
+        emit(d, depth + 1, "case %lld: {", keys[i]);
+        fputs(a, d->out); free(a);
+        emit(d, depth + 1, "}");
+    }
+    if (deflt >= 0 && deflt != join) {
+        Snap s; snap_take(d, &s);
+        char *a = arm_text(d, f, g, deflt, join, lc, depth + 2);
+        snap_restore(d, &s, 0);
+        emit(d, depth + 1, "default: {");
+        fputs(a, d->out); free(a);
+        emit(d, depth + 1, "}");
+    }
+    emit(d, depth, "}");
+    return 1;
+}
+
+static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx *lc, int depth, int enter) {
+    if (depth > 48 || g_budget <= 0) {
+        emit(d, depth, "// E402: control flow too tangled to structure here (block %d)", bi);
+        g_budget = 0;
+        return;
+    }
+    while (bi >= 0 && bi < g->n && g_budget-- > 0) {
+        if (!enter) {
+            if (bi == stop) {
+                if (ret_only(&f->blocks[bi])) emit_ret(d, depth);
+                return;
+            }
+            if (lc && bi == lc->header) { emit(d, depth, "continue;"); return; }
+            if (lc && bi == lc->exit) { emit(d, depth, "break;"); return; }
+            if (g->loop_exit[bi] != -2 && !(lc && lc->header == bi)) {
+                int latch;
+                flush_decls(d);
+                LCtx inner = { bi, g->loop_exit[bi] };
+                const IrBlock *hb = &f->blocks[bi];
+                const IrInsn *ht = hb->ninsns ? &hb->insns[hb->ninsns - 1] : NULL;
+                unsigned char *in = g->inloop + (size_t)bi * g->n;
+                if (ht && ht->op == IR_BR && g->nsucc[bi] == 2 && !block_emits(hb) &&
+                    (!in[ht->a.block] || !in[ht->b.block]) && (in[ht->a.block] || in[ht->b.block])) {
+                    for (int k = 0; k < hb->ninsns - 1; k++) step(d, &hb->insns[k], depth, NULL);
+                    Ex c = br_cond(d, ht, hb);
+                    int body = in[ht->a.block] ? thread(f, ht->a.block) : thread(f, ht->b.block);
+                    if (!in[ht->a.block]) c = ex_un("!", c);
+                    { char bb[1024]; emit(d, depth, "while (%s) {", bare(c.s, bb, sizeof bb)); }
+                    ex_free(c);
+                    Snap s; snap_take(d, &s);
+                    structure(d, f, g, body, bi, &inner, depth + 1, 0);
+                    snap_restore(d, &s, 0);
+                    emit(d, depth, "}");
+                } else if ((latch = find_latch(f, g, bi)) >= 0) {
+                    const IrBlock *lb = &f->blocks[latch];
+                    const IrInsn *lt = &lb->insns[lb->ninsns - 1];
+                    LCtx dl = { latch, inner.exit };
+                    emit(d, depth, "do {");
+                    Snap s; snap_take(d, &s);
+                    structure(d, f, g, bi, latch, &dl, depth + 1, 1);
+                    for (int k = 0; k < lb->ninsns - 1; k++) step(d, &lb->insns[k], depth + 1, NULL);
+                    Ex c = br_cond(d, lt, lb);
+                    if (thread(f, lt->a.block) != bi) c = ex_un("!", c);
+                    { char bb[1024]; emit(d, depth, "} while (%s);", bare(c.s, bb, sizeof bb)); }
+                    ex_free(c);
+                    snap_restore(d, &s, 0);
+                } else {
+                    emit(d, depth, "while (1) {");
+                    Snap s; snap_take(d, &s);
+                    structure(d, f, g, bi, bi, &inner, depth + 1, 1);
+                    snap_restore(d, &s, 0);
+                    emit(d, depth, "}");
+                }
+                bi = inner.exit;
+                if (bi < 0) return;
+                continue;
+            }
+        }
+        enter = 0;
         const IrBlock *b = &f->blocks[bi];
         const IrInsn *term = b->ninsns ? &b->insns[b->ninsns - 1] : NULL;
         int nbody = term && ir_is_terminator(term->op) ? b->ninsns - 1 : b->ninsns;
         for (int k = 0; k < nbody; k++) step(d, &b->insns[k], depth, NULL);
-
-        if (!term) break;
-
-        if (term->op == IR_BR) {
-            Ex cond = br_cond(d, term, b);
-            int taken = term->a.block, fall = term->b.block;
-            int join = find_join(f, taken, fall);
-
-            if (is_loop_header(f, bi)) {
-                /* Body is the side that jumps back. Prefer fall if it jmps to bi. */
-                int body = fall, exitb = taken;
-                int body_backs = 0;
-                {
-                    const IrInsn *t = f->blocks[fall].ninsns ? &f->blocks[fall].insns[f->blocks[fall].ninsns-1] : NULL;
-                    if (t && t->op == IR_JMP && t->a.block == bi) body_backs = 1;
-                }
-                if (!body_backs) {
-                    const IrInsn *t = f->blocks[taken].ninsns ? &f->blocks[taken].insns[f->blocks[taken].ninsns-1] : NULL;
-                    if (t && t->op == IR_JMP && t->a.block == bi) { body = taken; exitb = fall; body_backs = 1; }
-                }
-                if (body_backs) {
-                    Ex c;
-                    if (exitb == taken) {
-                        if (cond.s[0]=='(' && cond.s[1]=='!') {
-                            char *s = strdup(cond.s + 2);
-                            size_t L = strlen(s);
-                            if (L && s[L-1]==')') s[L-1]=0;
-                            c = (Ex){ s };
-                        } else c = ex_un("!", ex(cond.s));
-                        ex_free(cond);
-                    } else c = cond;
-                    { char bb[1024]; emit(d, depth, "while (%s) {", bare(c.s, bb, sizeof bb)); }
-                    ex_free(c);
-                    int *seen2 = calloc((size_t)f->nblocks, sizeof(int));
-                    /* Allow the header to be "seen" so body doesn't re-enter walk of header. */
-                    seen2[bi] = 1;
-                    walk2(d, f, body, bi, depth + 1, seen2);
-                    free(seen2);
-                    emit(d, depth, "}");
-                    bi = exitb;
-                    continue;
-                }
-            }
-
-            /* Div-zero / bounds checks: taken arm calls an unrecovered helper and
-             * does nothing else interesting. */
-            {
-                int saw_fail = 0, only_fail = 1;
-                const IrBlock *tb = &f->blocks[taken];
-                for (int k = 0; k < tb->ninsns; k++) {
-                    const IrInsn *in = &tb->insns[k];
-                    if (is_prolog(in) || is_epilog(in) || in->op == IR_NOP || in->op == IR_TRAP) continue;
-                    if (in->op == IR_JMP || in->op == IR_RET) continue;
-                    if (in->op == IR_ADDR || in->op == IR_ZEXT || in->op == IR_SEXT) continue;
-                    if (in->op == IR_MOV && in->a.kind != IR_O_IMM) { only_fail = 0; break; }
-                    if (in->op == IR_MOV) continue;
-                    if (in->op == IR_CALL && in->a.kind == IR_O_ADDR) {
-                        Fun *t = fby(d, in->a.addr);
-                        if (!t || t->kind == 3) { saw_fail = 1; continue; }
-                    }
-                    only_fail = 0; break;
-                }
-                if (only_fail && saw_fail && !is_loop_header(f, bi)) {
-                    ex_free(cond);
-                    const IrInsn *tl = tb->ninsns ? &tb->insns[tb->ninsns - 1] : NULL;
-                    if (falls_through(tl) && taken + 1 < f->nblocks) bi = taken + 1;
-                    else if (tl && tl->op == IR_JMP) bi = tl->a.block;
-                    else bi = fall;
-                    continue;
-                }
-            }
-            { char bb[1024]; emit(d, depth, "if (%s) {", bare(cond.s, bb, sizeof bb)); }
-            ex_free(cond);
-            if (join == -2) {
-                int rb = -1;
-                {
-                    const IrInsn *t = f->blocks[taken].ninsns ? &f->blocks[taken].insns[f->blocks[taken].ninsns-1] : NULL;
-                    if (t && t->op == IR_JMP) rb = t->a.block;
-                    else if (is_ret_block(f, taken)) rb = taken;
-                }
-                walk2(d, f, taken, rb, depth + 1, seen);
-                if (d->cur->kind != 2) emit(d, depth + 1, "return %s;", d->has[0] ? d->reg[0].s : "0");
-                emit(d, depth, "} else {");
-                if (d->has[0]) { ex_free(d->reg[0]); d->has[0] = 0; }
-                walk2(d, f, fall, rb, depth + 1, seen);
-                if (d->cur->kind != 2) emit(d, depth + 1, "return %s;", d->has[0] ? d->reg[0].s : "0");
-                emit(d, depth, "}");
-                return;
-            }
-            walk2(d, f, taken, join >= 0 ? join : until, depth + 1, seen);
-            if (fall != join && !seen[fall]) {
-                int need_else = join >= 0 || until < 0;
-                if (need_else) {
-                    emit(d, depth, "} else {");
-                    walk2(d, f, fall, join >= 0 ? join : until, depth + 1, seen);
-                }
-            }
-            emit(d, depth, "}");
-            bi = join >= 0 ? join : -1;
-            continue;
-        }
-        if (term->op == IR_JMP && term->a.kind == IR_O_BLOCK) { bi = term->a.block; continue; }
-        if (term->op == IR_RET) {
-            if (d->cur->kind != 2) {
-                if (d->has[0]) emit(d, depth, "return %s;", d->reg[0].s);
-                else emit(d, depth, "return 0;");
-            }
+        if (g->nsucc[bi] == 0) {
+            if (term && term->op == IR_RET) emit_ret(d, depth);
             return;
         }
-        if (b->nsucc == 1) bi = b->succ[0];
-        else break;
+        if (g->nsucc[bi] == 1) {
+            if (term && term->op == IR_BR) d->cmp = NULL; /* dropped check */
+            bi = g->succ[bi][0];
+            continue;
+        }
+        /* two-way branch */
+        flush_decls(d);
+        Ex c = br_cond(d, term, b);
+        int ta = thread(f, term->a.block), fb = thread(f, term->b.block);
+        char bb[1024];
+        if (try_switch(d, f, g, bi, lc, depth)) { bi = g->ipdom[bi]; ex_free(c); if (bi >= g->n) return; continue; }
+        if (lc && ((ta == lc->exit && fb == lc->header) || (fb == lc->exit && ta == lc->header))) {
+            if (ta != lc->exit) c = ex_un("!", c);
+            emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb)); ex_free(c);
+            emit(d, depth + 1, "break;");
+            emit(d, depth, "}");
+            if (stop == lc->header) return;
+            emit(d, depth, "continue;");
+            return;
+        }
+        if (lc && (ta == lc->exit || ta == lc->header || fb == lc->exit || fb == lc->header)) {
+            int jump = (ta == lc->exit || ta == lc->header) ? ta : fb;
+            int other = jump == ta ? fb : ta;
+            if (jump != ta) c = ex_un("!", c);
+            emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb)); ex_free(c);
+            emit(d, depth + 1, jump == lc->exit ? "break;" : "continue;");
+            emit(d, depth, "}");
+            bi = other;
+            continue;
+        }
+        int join = g->ipdom[bi];
+        if (join >= g->n) join = -1;
+        if (join < 0 || ret_only(&f->blocks[join])) join = (ta == stop || fb == stop) ? stop : common_reach(f, g, bi, ta, fb, lc, stop);
+        int ret_join = join >= 0 && ret_only(&f->blocks[join]);
+        Snap s; snap_take(d, &s);
+        char *armA = ta == join ? strdup("") : arm_text(d, f, g, ta, join, lc, depth + 1);
+        snap_restore(d, &s, 1);
+        char *armB = fb == join ? strdup("") : arm_text(d, f, g, fb, join, lc, depth + 1);
+        if (!*armA && !*armB) { /* both empty: keep side effects only */ }
+        else if (!*armA) {
+            c = ex_un("!", c);
+            emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb));
+            fputs(armB, d->out); emit(d, depth, "}");
+        } else if (!*armB) {
+            emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb));
+            fputs(armA, d->out); emit(d, depth, "}");
+        } else {
+            emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb));
+            fputs(armA, d->out);
+            emit(d, depth, "} else {");
+            fputs(armB, d->out);
+            emit(d, depth, "}");
+        }
+        ex_free(c); free(armA); free(armB);
+        snap_restore(d, &s, 0);
+        if (join < 0 || ret_join) return;
+        bi = join;
     }
 }
 
@@ -915,24 +1326,34 @@ static void decompile_fun(D *d, Fun *fi) {
     fprintf(d->out, "fn %s(", fi->name);
     for (int a = 0; a < fi->nargs; a++) fprintf(d->out, "%s%c", a ? ", " : "", 'a' + a);
     fprintf(d->out, ") {\n");
-    for (int i = 0; i < fi->nslots; i++)
-        if (fi->slots[i].arg < 0) {
-            const char *h = fi->slots[i].hint == 1 ? " /* hint: array */" :
-                            fi->slots[i].hint == 2 ? " /* hint: pointer */" : "";
-            fprintf(d->out, "    let %s = 0;%s\n", fi->slots[i].name, h);
-        }
-
     /* reset env */
     for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
     while (d->nstk) ex_free(d->stk[--d->nstk]);
     d->cmp = NULL;
     d->cur = fi;
-    /* Seed arg regs from parameters for functions that don't spill. */
-    for (int a = 0; a < fi->nargs; a++) setr(d, ARG[a], exf("%c", 'a' + a));
-
-    int *seen = calloc((size_t)f->nblocks, sizeof(int));
-    walk2(d, f, 0, -1, 1, seen);
-    free(seen);
+    G g;
+    if (g_build(d, f, &g) == 0) {
+        /* Pass 1 (discarded) collects hints; pass 2 prints. */
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
+            while (d->nstk) ex_free(d->stk[--d->nstk]);
+            for (int a = 0; a < fi->nargs; a++) setr(d, ARG[a], exf("%c", 'a' + a));
+            d->cmp = NULL;
+            memset(d->declared, 0, sizeof d->declared);
+            d->flat = 1;
+            g_budget = 20000;
+            if (pass == 0) {
+                char *buf = NULL; size_t n = 0;
+                FILE *save = d->out, *m = open_memstream(&buf, &n);
+                if (!m) continue;
+                d->out = m;
+                structure(d, f, &g, 0, -1, NULL, 1, 0);
+                fclose(m); free(buf);
+                d->out = save;
+            } else structure(d, f, &g, 0, -1, NULL, 1, 0);
+        }
+    } else emit(d, 1, "// E600: could not build the control-flow graph for this function");
+    g_free(&g);
     fprintf(d->out, "}\n\n");
 }
 

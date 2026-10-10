@@ -25,7 +25,7 @@ def count_metrics(src: str):
     loc = sum(1 for ln in src.splitlines() if ln.strip() and not ln.strip().startswith("//"))
     temps = len(set(re.findall(r"\bt\d+\b", src)))
     # raw-IR / unrecovered markers
-    raw = len(re.findall(r"\br\d+\b|\bfn_[0-9a-f]+\b|\bm-?\d+\b|\*r\d+", src))
+    raw = len(re.findall(r"\br\d+\b|\bfn_[0-9a-f]+\b|\bm-?\d+\b|\*r\d+|\bfp\b|\bE402\b", src))
     return loc, temps, raw
 
 def ensure_isa():
