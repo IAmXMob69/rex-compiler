@@ -232,3 +232,5 @@ Decompile: names are invented. A call through a register prints the pointer expr
 - `docs/compiler.md` is the architecture audit
 
 See [docs/compiler.md](docs/compiler.md) for the front end, both pipelines, the machine IR, lift rules, runtime, global state and known issues.
+
+`make unit` also runs differential CPU tests (`tests/test_cpu_diff.c`) checking alu/logic/shift/compare/test ops against host inline asm for results and flags across widths and edge values.

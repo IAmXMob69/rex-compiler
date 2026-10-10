@@ -131,6 +131,18 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
                 if (al_push(&work, in->ops[0].target) || al_push(&leaders, in->ops[0].target) || al_push(&leaders, next)) goto oom;
             }
             if (in->op == X86_CALL && in->ops[0].kind == XO_REL && al_push(calls, in->ops[0].target)) goto oom;
+            if ((in->op == X86_LEA || in->op == X86_MOV) && in->nops >= 2) {
+                const X86Operand *so = &in->ops[1];
+                uint64_t t = 0;
+                if (so->kind == XO_MEM && so->base == X86_RIP) t = so->target;
+                if (t) {
+                    size_t av = 0;
+                    const unsigned char *p = rex_elf_code_at(e, t, &av);
+                    if (p && av >= 1 && (p[0] == 0x55 || (av >= 4 && p[0] == 0xf3 && p[1] == 0x0f))) {
+                        if (al_push(calls, t)) goto oom;
+                    }
+                }
+            }
             if (cfg_is_exit(prev, in)) { if (al_push(&leaders, next)) goto oom; break; }
             prevbuf = *in;
             prev = &prevbuf;

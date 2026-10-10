@@ -217,6 +217,7 @@ static void classify(D *d) {
             fi->kind = 3;
             /* Guess builtin from shape. */
             int div = 0, imm10 = 0, mmap = 0, munmap = 0, byte_st = 0;
+            int sys0 = 0, sys57 = 0, sys59 = 0, dig = 0;
             for (int b = 0; b < f->nblocks; b++)
                 for (int k = 0; k < f->blocks[b].ninsns; k++) {
                     const IrInsn *in = &f->blocks[b].insns[k];
@@ -224,14 +225,29 @@ static void classify(D *d) {
                     if (in->op == IR_MOV && in->a.kind == IR_O_IMM && in->a.imm == 10) imm10 = 1;
                     if (in->op == IR_MOV && in->a.kind == IR_O_IMM && in->a.imm == 9) mmap = 1;
                     if (in->op == IR_MOV && in->a.kind == IR_O_IMM && in->a.imm == 11) munmap = 1;
+                    if (in->op == IR_MOV && in->a.kind == IR_O_IMM && in->a.imm == 57) sys57 = 1;
+                    if (in->op == IR_MOV && in->a.kind == IR_O_IMM && in->a.imm == 59) sys59 = 1;
                     if (in->op == IR_STORE && in->dst.width == 1) byte_st = 1;
+                    if (in->op == IR_CMP && ((in->b.kind == IR_O_IMM && (in->b.imm == 48 || in->b.imm == 57)) ||
+                        (in->a.kind == IR_O_IMM && (in->a.imm == 48 || in->a.imm == 57)))) dig = 1;
+                    if (in->op == IR_SYSCALL) {
+                        for (int j = k - 1; j >= 0 && j >= k - 6; j--) {
+                            const IrInsn *p = &f->blocks[b].insns[j];
+                            if (p->op == IR_XOR && p->dst.reg == 0 && p->a.kind == IR_O_REG && p->a.reg == 0) sys0 = 1;
+                            if (p->op == IR_MOV && p->dst.reg == 0 && p->a.kind == IR_O_IMM && p->a.imm == 0) sys0 = 1;
+                        }
+                    }
                 }
-            if (div && imm10) fi->builtin = "print";
+            if (sys57 || sys59) fi->builtin = "exec";
+            else if (sys0 && dig) fi->builtin = "read";
+            else if (div && imm10) fi->builtin = "print";
             else if (mmap) fi->builtin = "alloc";
             else if (munmap) fi->builtin = "free";
             else if (byte_st) fi->builtin = "putc";
-            else fi->builtin = "print"; /* string write */
+            else fi->builtin = "print";
             snprintf(fi->name, sizeof(fi->name), "%s", fi->builtin);
+            if (!strcmp(fi->builtin, "read")) fi->nargs = 0;
+            if (!strcmp(fi->builtin, "exec")) fi->nargs = 1;
         }
 
         /* Args: early stores of arg regs, or first uses. */
@@ -258,6 +274,28 @@ static void classify(D *d) {
                     if (ops[o]->kind == IR_O_MEM && ops[o]->base == 5 && ops[o]->index == IR_NOREG && ops[o]->disp < 0)
                         add_slot(fi, (int)ops[o]->disp, -1);
             }
+        if (fi->kind == 0 && !has_sys) {
+            int byte_ld = 0, cmp0 = 0, add1 = 0, n_byte = 0, has_mul = 0, ncall = 0;
+            for (int b = 0; b < f->nblocks; b++)
+                for (int k = 0; k < f->blocks[b].ninsns; k++) {
+                    const IrInsn *in = &f->blocks[b].insns[k];
+                    if (in->op == IR_LOAD && in->a.kind == IR_O_MEM && in->a.width == 1) byte_ld = 1;
+                    if (in->op == IR_ZEXT && in->a.kind == IR_O_MEM && in->a.width == 1) { byte_ld = 1; n_byte++; }
+                    if (in->op == IR_CMP && in->a.kind == IR_O_MEM && in->a.width == 1) byte_ld = 1;
+                    if (in->op == IR_CMP && ((in->b.kind == IR_O_IMM && in->b.imm == 0) ||
+                        (in->a.kind == IR_O_IMM && in->a.imm == 0))) cmp0 = 1;
+                    if (in->op == IR_ADD && in->b.kind == IR_O_IMM && in->b.imm == 1) add1 = 1;
+                    if (in->op == IR_MUL) has_mul = 1;
+                    if (in->op == IR_CALL) ncall++;
+                }
+            if (n_byte >= 2 && !has_mul && ncall == 0 && f->nblocks >= 3) {
+                fi->kind = 3; fi->builtin = "strcmp"; fi->nargs = 2;
+                snprintf(fi->name, sizeof(fi->name), "strcmp");
+            } else if (byte_ld && cmp0 && add1 && !has_mul && ncall == 0 && fi->nargs <= 1) {
+                fi->kind = 3; fi->builtin = "len"; fi->nargs = 1;
+                snprintf(fi->name, sizeof(fi->name), "len");
+            }
+        }
         (void)has_call;
     }
 }
@@ -274,10 +312,6 @@ static int is_prolog(const IrInsn *in) {
         in->a.kind == IR_O_REG && in->a.reg == 4) return 1;
     if (in->op == IR_SUB && in->dst.kind == IR_O_REG && in->dst.reg == 4 &&
         in->a.kind == IR_O_REG && in->a.reg == 4 && in->b.kind == IR_O_IMM) return 1;
-    if (in->op == IR_STORE && in->dst.kind == IR_O_MEM && in->dst.base == 5 &&
-        in->a.kind == IR_O_REG) {
-        for (int a = 0; a < 6; a++) if (in->a.reg == ARG[a]) return 1;
-    }
     return 0;
 }
 static int is_epilog(const IrInsn *in) {
@@ -355,7 +389,14 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         const char *nm = "fn";
         int na = 0;
         if (t) {
-            if (t->kind == 3 && t->builtin) { nm = t->builtin; na = !strcmp(nm, "print") || !strcmp(nm, "putc") || !strcmp(nm, "alloc") || !strcmp(nm, "free") ? 1 : t->nargs; }
+            if (t->kind == 3 && t->builtin) {
+                nm = t->builtin;
+                if (!strcmp(nm, "read")) na = 0;
+                else if (!strcmp(nm, "strcmp")) na = 2;
+                else if (!strcmp(nm, "print") || !strcmp(nm, "putc") || !strcmp(nm, "alloc") ||
+                         !strcmp(nm, "free") || !strcmp(nm, "len") || !strcmp(nm, "exec")) na = 1;
+                else na = t->nargs;
+            }
             else { nm = t->name; na = t->nargs; }
         } else if (in->a.kind == IR_O_REG) {
             Ex tg = getr(d, in->a.reg);
@@ -383,14 +424,22 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             ex_free(e);
         }
         Ex call = exf("%s(%s)", nm, args);
+        if (t && t->kind == 3 && t->builtin && !strcmp(t->builtin, "strcmp")) {
+            Ex a0 = getr(d, ARG[0]), a1 = getr(d, ARG[1]);
+            ex_free(call);
+            setr(d, 0, ex_bin("==", a0, a1));
+            if (emit_call) *emit_call = 0;
+            break;
+        }
         if ((!t && in->a.kind == IR_O_ADDR) || (t && t->kind == 3 && t->builtin &&
             strcmp(t->builtin, "print") && strcmp(t->builtin, "putc") &&
-            strcmp(t->builtin, "alloc") && strcmp(t->builtin, "free"))) {
-            /* Unrecovered or non-source helper (rex_fail, ...): drop. */
+            strcmp(t->builtin, "alloc") && strcmp(t->builtin, "free") &&
+            strcmp(t->builtin, "len") && strcmp(t->builtin, "exec") &&
+            strcmp(t->builtin, "read") && strcmp(t->builtin, "strcmp"))) {
             ex_free(call);
             break;
         }
-        if (t && t->kind == 3 && (!strcmp(nm, "print") || !strcmp(nm, "putc"))) {
+        if (t && t->kind == 3 && (!strcmp(nm, "print") || !strcmp(nm, "putc") || !strcmp(nm, "exec"))) {
             /* Skip print of absolute addresses left by elided fail paths. */
             if (na == 1 && d->has[ARG[0]] && d->reg[ARG[0]].s[0] >= '0' && d->reg[ARG[0]].s[0] <= '9') {
                 long long v = atoll(d->reg[ARG[0]].s);
