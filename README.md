@@ -1,6 +1,8 @@
 # REX
 
-REX is a small compiler and binary toolchain for x86-64 Linux. It turns a `.rex` file into an ELF, and it turns that ELF back into machine IR, a new ELF, or `.rex` source.
+REX is a small compiler and a reverse-engineering / recovery toolchain for native binaries. The long-term aim is Ghidra / Binary Ninja class work: load a binary, recover control flow, lift to a machine IR, recompile and decompile. It is not there yet. Today the only working load path is ELF64 x86-64 non-PIE (`ET_EXEC`), and the high-quality decompile path is tuned for binaries REX itself emitted. PE is recognized and refused with a clear message. There is no claim of parity with those tools.
+
+The compile path still turns a `.rex` file into an ELF that talks to the kernel directly, with no gcc and no assembler.
 
 It writes the program itself. It does not call gcc. It does not call an assembler. The finished file is an ELF that talks to the kernel directly.
 
@@ -30,6 +32,7 @@ All older command names still work. An unknown command prints `rex: unknown comm
 
 - Compiler: `.rex` → AST → AT&T text → built-in assembler → ELF64. No gcc, no `as`, no libc in the output.
 - Checks: use before `let`, duplicate names, call arity, simple types (`rex check`). Errors carry a caret; several are reported per run.
+- Loader registry: `src/loader.c` picks a format by magic. ELF64 is fully loaded; PE/COFF is recognized (MZ + PE signature, machine, PE32/PE32+) and refused with a distinct exit code. Unknown formats report the first bytes in hex.
 - ELF64 loader: reads headers and segments. Never runs the input.
 - x86-64 decoder and disassembler, with a control-flow graph per function.
 - Machine IR: architecture-independent, printed by `rex ir`.
@@ -220,7 +223,7 @@ fn main() {
 
 Language: No nested structs. A struct stays in the function that created it, unless you pass its address. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
 
-Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. Windows PE, ARM and game binaries are out of scope.
+Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. PE/COFF (x86-64, i386, arm64; PE32/PE32+) is recognized and exits with code 3 and a clear message; loading is not implemented. Other formats exit with code 2 and `unrecognized binary format: <hex>`. Function discovery still prefers REX-shaped prologues (`push rbp` / `endbr64`) when seeding from rip-relative lea/mov.
 
 Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). Direct calls start functions; a rip-relative `lea`/`mov` also does, but only when its target starts with `push rbp` (0x55) or `endbr64`. The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Indirect jumps are refused.
 
@@ -228,11 +231,25 @@ Recompile: no pc-relative `lea`, no 8/16-bit shifts. Function-pointer calls keep
 
 Decompile: names are invented. A call through a register prints the pointer expression with two arguments. Loops, arrays, pointers, globals and switches are only partly recovered; nested structs, switch and most pointer arithmetic stay opaque. Arbitrary binaries may be refused or give a stub that does not round-trip.
 
+## Roadmap
+
+Done: ELF64 loader behind a registry, PE recognition stub, machine IR, x86 lift of the REX instruction set, recompile, decompile for REX-shaped binaries, CFG recursive descent from entry and call targets.
+
+Next (no schedule):
+
+1. Real PE section/import parsing (then PE → IR for the same x86-64 subset).
+2. Fuller x86-64: SSE moves, remaining movzx/movsx forms, cmovcc, more imul forms, string ops, shifts by `%cl` in every width, `bt*`, `xchg`/`cmpxchg`, general rip-relative, PIC/PLT calls, jump tables.
+3. CFG recovery that does not depend on REX prologues: recursive descent plus linear sweep, seeds from symbols and `.eh_frame`, reducible-graph structuring.
+4. Explicit numbered failure modes for every unsupported format, opcode and recovery pattern.
+5. PIE / shared objects / relocations.
+6. Later: Mach-O, ARM64, RISC-V.
+
 ## Files
 
 - `src/rex.c` is the compiler and the CLI
 - `src/elf.c` is the assembler, the ELF writer and the embedded runtime
-- `src/elfread.c` is the ELF64 loader (reads; never runs the input)
+- `src/loader.c` / `src/loader.h` is the format registry (`rex_bin_open`)
+- `src/elfread.c` is the ELF64 loader implementation (reads; never runs the input)
 - `src/inspect.c` is `rex inspect` and `rex disasm`
 - `src/x86_decode.c` is the x86-64 decoder
 - `src/cfg.c` builds the control-flow graph

@@ -1,6 +1,6 @@
 # REX architecture
 
-Audit of this tree. Version: 0.17.0 (`REX_VERSION` in `src/rex.c`). Every claim below is checked against the source. It is not a claim that REX matches GCC, Clang, Rust, Go, or MSVC.
+Audit of this tree. Version: 0.17.0 (`REX_VERSION` in `src/rex.c`). Every claim below is checked against the source. Direction: a general-purpose reverse-engineering / recovery tool (load → CFG → machine IR → recompile / decompile), with the REX language compile path kept working. It is not a claim of parity with Ghidra, Binary Ninja, GCC, Clang, Rust, Go or MSVC.
 
 ## Two pipelines
 
@@ -47,6 +47,17 @@ The code that runs is the `runtime` string in `src/elf.c`: `rex_start`, `rex_pri
 
 This is the only runtime. The old libc `src/rexrt.c`, the dead `rt_path` lookup and `REX_RUNTIME` are gone: a C runtime cannot replace the embedded one without a C compiler and libc, which REX output does not use, so there is nothing for it to drift from.
 
+## Loader (`src/loader.h`, `src/loader.c`)
+
+`rex_bin_open` / `rex_bin_parse` walk a registry of `RexLoader` entries (`name`, `probe`, `parse`). First matching probe wins.
+
+| Name | Probe | Behavior |
+| --- | --- | --- |
+| `elf64` | `\x7fELF` | Full parse via `rex_elf_parse`. Same acceptance and refusals as before. |
+| `pe` | `MZ` at 0 and `PE\0\0` at `e_lfanew` | Reads the COFF machine (0x8664 / 0x14c / 0xaa64 / …) and optional-header magic (PE32 0x10b, PE32+ 0x20b). Returns `REX_BIN_ERR_PE_STUB` (exit 3) with `PE/COFF (<machine>, <magic>) recognized; PE loading not implemented yet`. No image is produced. |
+
+Anything else returns `REX_BIN_ERR_UNRECOGNIZED` (exit 2) with `unrecognized binary format: <up to 8 bytes as hex>`. Callers (`inspect`, `disasm`, `ir`, `recompile`, `decompile`) go through the registry and propagate those exit codes.
+
 ## ELF loader (`src/elfread.c`)
 
 `rex_elf_open` / `rex_elf_parse` treat the input as untrusted. Every offset is bounds-checked (`in_file`); nothing is executed. Accepts ELF64, little-endian, x86-64, OS ABI 0 or 3, `ET_EXEC`. Refuses 32-bit, big-endian, relocatable, shared/PIE, core, extended program header and section counts. `rex_elf_code_at` maps a virtual address to bytes.
@@ -79,6 +90,7 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 - `cqo` becomes `MOV rdx, rax; SAR rdx, 63`. `idiv` becomes `REMS` then `DIVS`, only if rdx was last set by `cqo` (rax untouched) or `xor edx, edx` in the same block.
 - When a branch reads flags from an ALU result instead of cmp/test, `need_flags` inserts the matching `TEST`.
 - `jcc` must end its block and becomes `BR taken, fallthrough`. `call` keeps its return address in `b`. An exit syscall is followed by `TRAP`.
+- `nop` / `endbr64` / `endbr32` emit nothing. `leave` becomes `mov rsp, rbp; pop rbp`.
 - Refused with an error: `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, other `idiv` forms, 16-bit push/pop, unmapped conditions, odd branch shapes, jumps outside the function, any unlisted instruction.
 
 ## Recompiler (`src/codegen.c`, `src/recompiler.c`)
@@ -99,6 +111,29 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 
 `step` evaluates IR symbolically into expressions; `walk2` rebuilds `if`/`else` (via `find_join`) and `while` (via `is_loop_header`). Prologue and epilogue are dropped. Calls to unrecognized helpers such as `rex_fail` are dropped. A call through a register prints the pointer expression called with two arguments. Output starts with two `//` header lines. `--verbose` prints each function's kind, argument count and builtin.
 
+## x86-64 decoder / lift roadmap
+
+Present today (decoder + lift unless noted): the REX emission set, plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32` (decoded as `ENDBR`, lifted as nop), `leave` (lifted to `mov rsp,rbp; pop rbp`), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate (including `f6`/`f7 /0`), `setcc`, `cqo`, shifts by imm and by `%cl`.
+
+Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` output:
+
+1. Remaining `movzx`/`movsx` / `movsxd` forms; `cdqe`.
+2. `cmovcc` (needs a select form in the IR or a branch diamond).
+3. More `imul` forms (one-operand full rdx:rax).
+4. String ops (`movs`, `stos`, `rep` prefixes) — likely refused with a clear error for a long time.
+5. `bt` / `bts` / `btr` / `btc`, `xchg`, `cmpxchg`, `xadd`.
+6. General rip-relative memory in more ops; PIC/PLT call shapes.
+7. Jump tables (switch) — CFG work as much as decode work.
+8. SSE/AVX moves used as GPR spills (`movdqa`/`movaps` to stack).
+
+## Roadmap (tool)
+
+1. Real PE section and import parsing; then PE → the same IR subset.
+2. CFG recovery independent of REX prologues: recursive descent + linear sweep, seeds from symbols and `.eh_frame`, reducible-graph structuring (dominators → if/else/while). Keep the REX path as the high-quality case.
+3. Numbered, stable failure codes for every unsupported format, opcode and recovery pattern; no silent partial output.
+4. PIE, shared objects, relocations.
+5. Mach-O, ARM64, RISC-V — each behind the same loader registry.
+
 ## Feature matrix
 
 | Area | Present | Missing |
@@ -110,7 +145,7 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 | Constants | `#define NAME integer`, char literals, enum | typed constants, const |
 | Strings | literals, index, len, equality | safe string type, formatting |
 | Output | x86-64 Linux ELF, one RWX load | objects, relocations, ARM64, PE, Mach-O |
-| Binary input | ELF64 x86-64 `ET_EXEC` | PIE, shared objects, other arches |
+| Binary input | ELF64 x86-64 `ET_EXEC`; PE recognition stub | PE load, PIE, shared objects, Mach-O, other arches |
 | Back half | inspect, disasm, CFG, IR, recompile, decompile | optimization, full decompile of loops/arrays/switch |
 | Tools | `run build check asm elf inspect disasm ir recompile decompile version help`, aliases `look show rebuild tosource undo`, Mousepad spec | fmt, lint, lsp, package manager |
 | Tests | example outputs, negative diagnostics, `rexcomp` fixed point, unit tests (IR, ELF reader, decoder), differential CPU tests, recompile and decompile round trips | fuzz, diagnostic snapshots |
