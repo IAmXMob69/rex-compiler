@@ -6,13 +6,13 @@ CC     ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
 
-SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/codegen.c src/recompiler.c src/decompiler.c src/inspect.c
+SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/codegen.c src/recompiler.c src/decompiler.c src/inspect.c src/loader.c
 
 .PHONY: all install uninstall test unit clean
 
 all: rex
 
-rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h src/x86_lift.h src/codegen.h src/recompiler.h src/decompiler.h
+rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h src/x86_lift.h src/codegen.h src/recompiler.h src/decompiler.h src/loader.h
 	$(CC) $(CFLAGS) -o rex $(SRCS)
 	chmod +x rex
 
@@ -42,6 +42,7 @@ uninstall:
 unit:
 	$(CC) $(CFLAGS) -o /tmp/rex_test_ir tests/test_ir.c src/ir.c && /tmp/rex_test_ir
 	$(CC) $(CFLAGS) -o /tmp/rex_test_elf tests/test_elf.c src/elfread.c && /tmp/rex_test_elf
+	$(CC) $(CFLAGS) -o /tmp/rex_test_loader tests/test_loader.c src/loader.c src/elfread.c && /tmp/rex_test_loader
 	$(CC) $(CFLAGS) -o /tmp/rex_test_x86 tests/test_x86.c src/x86_decode.c && /tmp/rex_test_x86
 	$(CC) $(CFLAGS) -o /tmp/rex_test_cpu tests/test_cpu_diff.c src/ir.c src/x86_decode.c && /tmp/rex_test_cpu
 
@@ -146,7 +147,7 @@ test: rex unit
 	rm -f /tmp/rexfifo
 	./rex inspect /tmp/stage | grep -q 'Executable segments: 1'
 	./rex disasm /tmp/stage | grep -q syscall
-	! ./rex inspect Makefile 2>/tmp/rexin.err && grep -q 'bad magic' /tmp/rexin.err
+	! ./rex inspect Makefile 2>/tmp/rexin.err && grep -qE 'bad magic|unrecognized binary format' /tmp/rexin.err
 	./rex disasm --cfg /tmp/self2 | grep -q 'block'
 	./rex disasm --function main /tmp/stage | grep -q 'return'
 	./rex recompile --poison /tmp/stage -o /tmp/stage.re

@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "elfread.h"
+#include "loader.h"
 #include "x86_decode.h"
 #include "cfg.h"
 #include "x86_lift.h"
@@ -28,7 +28,7 @@ static void pflags(uint32_t f, char *b) {
 int rex_cmd_inspect(const char *path) {
     RexElf e;
     char err[256];
-    if (rex_elf_open(path, &e, err, sizeof(err))) { fprintf(stderr, "rex: inspect: %s\n", err); return 1; }
+    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: inspect: %s\n", err); return _rc; } }
     printf("ELF64 x86-64 executable\n");
     printf("Entry: 0x%llx\n", (unsigned long long)e.entry);
     printf("Size: %zu bytes\n", e.size);
@@ -103,7 +103,7 @@ int rex_cmd_disasm_func(const char *path, const char *fname) {
     RexElf e;
     CfgProgram p;
     char err[256];
-    if (rex_elf_open(path, &e, err, sizeof(err))) { fprintf(stderr, "rex: disasm: %s\n", err); return 1; }
+    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: disasm: %s\n", err); return _rc; } }
     if (cfg_build(&e, &p, err, sizeof(err))) { fprintf(stderr, "rex: disasm: %s\n", err); rex_elf_free(&e); return 1; }
     int rc = 0;
     if (!fname) {
@@ -121,7 +121,7 @@ int rex_cmd_disasm_func(const char *path, const char *fname) {
 int rex_cmd_disasm(const char *path) {
     RexElf e;
     char err[256];
-    if (rex_elf_open(path, &e, err, sizeof(err))) { fprintf(stderr, "rex: disasm: %s\n", err); return 1; }
+    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: disasm: %s\n", err); return _rc; } }
     for (int s = 0; s < e.nph; s++) {
         const RexPhdr *h = &e.ph[s];
         if (h->type != REX_PT_LOAD || !(h->flags & REX_PF_X) || h->filesz == 0) continue;
@@ -146,7 +146,7 @@ int rex_cmd_ir(const char *path, const char *fname) {
     RexElf e;
     CfgProgram p;
     char err[256];
-    if (rex_elf_open(path, &e, err, sizeof(err))) { fprintf(stderr, "rex: ir: %s\n", err); return 1; }
+    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: ir: %s\n", err); return _rc; } }
     if (cfg_build(&e, &p, err, sizeof(err))) { fprintf(stderr, "rex: ir: %s\n", err); rex_elf_free(&e); return 1; }
     IrModule *m = x86_lift(&p, err, sizeof(err));
     int rc = 0;
