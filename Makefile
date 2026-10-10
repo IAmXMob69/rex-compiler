@@ -165,7 +165,9 @@ test: rex unit
 	python3 -c "import struct;img=bytearray(0x400);img[0:2]=b'MZ';struct.pack_into('<I',img,0x3c,0x80);img[0x80:0x84]=b'PE\0\0';struct.pack_into('<H',img,0x84,0x8664);struct.pack_into('<H',img,0x86,1);struct.pack_into('<H',img,0x94,232);o=0x98;struct.pack_into('<H',img,o,0x20b);struct.pack_into('<I',img,o+16,0x1000);struct.pack_into('<Q',img,o+24,0x140000000);struct.pack_into('<I',img,o+32,0x1000);struct.pack_into('<I',img,o+36,0x200);struct.pack_into('<H',img,o+48,6);struct.pack_into('<I',img,o+56,0x2000);struct.pack_into('<I',img,o+60,0x200);struct.pack_into('<H',img,o+68,3);struct.pack_into('<I',img,o+108,15);s=0x80+4+20+232;img[s:s+8]=b'.text\0\0\0';struct.pack_into('<I',img,s+8,0x1000);struct.pack_into('<I',img,s+12,0x1000);struct.pack_into('<I',img,s+16,0x200);struct.pack_into('<I',img,s+20,0x200);struct.pack_into('<I',img,s+36,0x60000020);img[0x200:0x208]=bytes([0x48,0xc7,0xc0,0x2a,0,0,0,0xc3]);open('/tmp/rex_tiny.pe','wb').write(img)"
 	./rex look /tmp/rex_tiny.pe | grep -q PE32+
 	./rex show /tmp/rex_tiny.pe | grep -q 'mov'
-	! ./rex rebuild /tmp/rex_tiny.pe -o /tmp/rex_tiny.out 2>/tmp/rex_pe_rb.err; grep -q E502 /tmp/rex_pe_rb.err
+	./rex rebuild /tmp/rex_tiny.pe -o /tmp/rex_tiny.out
+	./rex look /tmp/rex_tiny.out | grep -q PE32+
+	./rex ir /tmp/rex_tiny.out | grep -q 'mov rax'
 	./rex decompile /tmp/stage -o /tmp/stage.dec.rex
 	./rex run /tmp/stage.dec.rex | cmp - examples/stage.out
 	printf '%s\n' 'fn add(a,b){return a+b;}' 'fn main(){print(add(40,2));}' > /tmp/leaf.rex

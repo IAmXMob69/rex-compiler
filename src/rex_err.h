@@ -69,7 +69,7 @@ static inline const char *rex_err_plain(int code) {
     case REX_E403_NO_CODE:      return "That address is not inside executable code.";
     case REX_E500_RECOMPILE:    return "I could not write a new binary.";
     case REX_E501_VERIFY:       return "The new binary did not match the original when I ran both.";
-    case REX_E502_PE_REBUILD:   return "I can look at Windows programs, but I cannot rebuild them yet.";
+    case REX_E502_PE_REBUILD:   return "I could not rebuild that Windows program cleanly.";
     case REX_E600_DECOMPILE:    return "I could not turn the binary back into source.";
     case REX_E601_VERIFY:       return "The recovered source did not match the original when I ran both.";
     default:                    return "Something went wrong.";

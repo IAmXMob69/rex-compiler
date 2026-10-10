@@ -45,6 +45,16 @@ static uint32_t pe_sec_flags(uint32_t ch) {
     return f;
 }
 
+
+/* Packed heuristic without libm: many distinct bytes in an RX section. */
+static int pe_high_entropy(const unsigned char *p, size_t n) {
+    if (n < 256) return 0;
+    unsigned char seen[256] = {0};
+    size_t uniq = 0, take = n > 4096 ? 4096 : n;
+    for (size_t i = 0; i < take; i++) if (!seen[p[i]]) { seen[p[i]] = 1; uniq++; }
+    return uniq >= 240; /* ~7.2 bits/byte Shannon for flat data */
+}
+
 static int pe_parse(const unsigned char *data, size_t len, RexElf *out, char *err, size_t errlen) {
     memset(out, 0, sizeof(*out));
     if (!pe_probe(data, len))
@@ -125,6 +135,18 @@ static int pe_parse(const unsigned char *data, size_t len, RexElf *out, char *er
     }
     if (nexec == 0)
         return rex_errf(err, errlen, REX_E110_PE_PACKED, "no executable section");
+    for (int i = 0; i < nsec; i++) {
+        const unsigned char *sec = data + sec_off + (size_t)i * 40;
+        uint32_t ch = pe_u32(sec + 36);
+        if (!(ch & 0x20000000u)) continue;
+        uint32_t rawsz = pe_u32(sec + 16), rawptr = pe_u32(sec + 20);
+        if (rawsz >= 256 && rawptr + rawsz <= len && pe_high_entropy(data + rawptr, rawsz))
+            return rex_errf(err, errlen, REX_E110_PE_PACKED,
+                            "executable section %d looks packed (high entropy)", i);
+        if ((ch & 0xA0000000u) == 0xA0000000u && !(ch & 0x00000020u) && nsec > 2)
+            return rex_errf(err, errlen, REX_E110_PE_PACKED,
+                            "executable section %d has odd flags 0x%x", i, ch);
+    }
 
     RexElf e = {0};
     e.type = 2; /* pretend ET_EXEC */
