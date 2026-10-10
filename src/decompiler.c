@@ -51,6 +51,7 @@ typedef struct {
     int off;
     char name[16];
     int arg;        /* 0..5, or -1 */
+    int hint;       /* 0 none, 1 array, 2 pointer — recovery hints only */
 } Slot;
 
 typedef struct {
@@ -111,9 +112,14 @@ static void add_slot(Fun *f, int off, int arg) {
     for (int i = 0; i < f->nslots; i++) if (f->slots[i].off == off) return;
     if (f->nslots >= MAX_LOC) return;
     Slot *s = &f->slots[f->nslots++];
-    s->off = off; s->arg = arg;
+    s->off = off; s->arg = arg; s->hint = 0;
     if (arg >= 0) snprintf(s->name, sizeof(s->name), "%c", 'a' + arg);
     else snprintf(s->name, sizeof(s->name), "t%d", f->nslots);
+}
+
+static void slot_hint(Fun *f, int off, int hint) {
+    for (int i = 0; i < f->nslots; i++)
+        if (f->slots[i].off == off && f->slots[i].hint == 0) f->slots[i].hint = hint;
 }
 
 static Ex mem_ex(D *d, const IrOperand *o) {
@@ -122,14 +128,17 @@ static Ex mem_ex(D *d, const IrOperand *o) {
         if (n) return ex(n);
         return exf("m%d", (int)o->disp);
     }
-    if (o->base == 5 && o->index != IR_NOREG && o->scale == 8) {
+    if (o->base == 5 && o->index != IR_NOREG && o->scale >= 1) {
         /* Local array cell: nearest slot at or below disp. */
         const char *base = NULL;
-        int best = 1;
+        int best = 1<<30, base_off = 0;
         for (int i = 0; i < d->cur->nslots; i++) {
             int dlt = (int)o->disp - d->cur->slots[i].off;
-            if (dlt >= 0 && dlt % 8 == 0 && (!base || dlt < best)) { base = d->cur->slots[i].name; best = dlt; }
+            if (dlt >= 0 && dlt % (o->scale ? o->scale : 1) == 0 && (!base || dlt < best)) {
+                base = d->cur->slots[i].name; best = dlt; base_off = d->cur->slots[i].off;
+            }
         }
+        if (base) slot_hint(d->cur, base_off, 1);
         if (base) {
             Ex ix = getr(d, o->index);
             if (best) {
@@ -526,6 +535,120 @@ static Ex br_cond(D *d, const IrInsn *br, const IrBlock *b) {
     return ex("1");
 }
 
+
+/* ---- Dominators / postdominators (reducible structuring) ---- */
+
+static void ir_succs(const IrFunc *f, int b, int *succs, int *ns) {
+    *ns = 0;
+    if (b < 0 || b >= f->nblocks) return;
+    const IrBlock *bl = &f->blocks[b];
+    if (bl->nsucc > 0) {
+        for (int i = 0; i < bl->nsucc && i < 2; i++) succs[(*ns)++] = bl->succ[i];
+        return;
+    }
+    const IrInsn *t = bl->ninsns ? &bl->insns[bl->ninsns - 1] : NULL;
+    if (!t) return;
+    if (t->op == IR_JMP && t->a.kind == IR_O_BLOCK) succs[(*ns)++] = t->a.block;
+    else if (t->op == IR_BR) { succs[(*ns)++] = t->a.block; succs[(*ns)++] = t->b.block; }
+}
+
+static int dom_intersect(int *idom, int b1, int b2) {
+    while (b1 != b2) {
+        while (b1 > b2) b1 = idom[b1];
+        while (b2 > b1) b2 = idom[b2];
+    }
+    return b1;
+}
+
+static int *compute_idom(const IrFunc *f) {
+    int n = f->nblocks;
+    if (n <= 0) return NULL;
+    int *idom = malloc((size_t)n * sizeof(int));
+    int *pred_n = calloc((size_t)n, sizeof(int));
+    int **pred = calloc((size_t)n, sizeof(int *));
+    int *fill = calloc((size_t)n, sizeof(int));
+    if (!idom || !pred_n || !pred || !fill) { free(idom); free(pred_n); free(pred); free(fill); return NULL; }
+    for (int b = 0; b < n; b++) {
+        int succs[2], ns = 0; ir_succs(f, b, succs, &ns);
+        for (int i = 0; i < ns; i++) if (succs[i] >= 0 && succs[i] < n) pred_n[succs[i]]++;
+    }
+    for (int b = 0; b < n; b++) if (pred_n[b]) pred[b] = calloc((size_t)pred_n[b], sizeof(int));
+    for (int b = 0; b < n; b++) {
+        int succs[2], ns = 0; ir_succs(f, b, succs, &ns);
+        for (int i = 0; i < ns; i++) {
+            int s = succs[i];
+            if (s >= 0 && s < n && pred[s]) pred[s][fill[s]++] = b;
+        }
+    }
+    for (int b = 0; b < n; b++) idom[b] = -1;
+    idom[0] = 0;
+    int changed = 1, guard = 0;
+    while (changed && guard++ < n * n) {
+        changed = 0;
+        for (int b = 1; b < n; b++) {
+            int new_idom = -1;
+            for (int i = 0; i < pred_n[b]; i++) {
+                int p = pred[b][i];
+                if (idom[p] < 0) continue;
+                new_idom = (new_idom < 0) ? p : dom_intersect(idom, p, new_idom);
+            }
+            if (new_idom >= 0 && idom[b] != new_idom) { idom[b] = new_idom; changed = 1; }
+        }
+    }
+    for (int b = 0; b < n; b++) free(pred[b]);
+    free(pred); free(pred_n); free(fill);
+    return idom;
+}
+
+static int dominates(const int *idom, int a, int b) {
+    if (!idom || a < 0 || b < 0) return 0;
+    int guard = 0;
+    while (guard++ < 10000) {
+        if (b == a) return 1;
+        if (b == idom[b]) return a == b;
+        b = idom[b];
+        if (b < 0) return 0;
+    }
+    return 0;
+}
+
+/* True when some edge u->v has v not dominating u while v is a DFS ancestor of u
+ * (a retreating non-back edge). Only meaningful for the function's reachable CFG. */
+static int cfg_irreducible(const IrFunc *f, const int *idom) {
+    int n = f->nblocks;
+    if (!idom || n <= 1) return 0;
+    int *parent = malloc((size_t)n * sizeof(int));
+    int *seen = calloc((size_t)n, sizeof(int));
+    int *stack = malloc((size_t)n * sizeof(int));
+    if (!parent || !seen || !stack) { free(parent); free(seen); free(stack); return 0; }
+    for (int i = 0; i < n; i++) parent[i] = -1;
+    int sp = 0; stack[sp++] = 0; seen[0] = 1;
+    while (sp) {
+        int b = stack[--sp];
+        int succs[2], ns = 0; ir_succs(f, b, succs, &ns);
+        for (int i = 0; i < ns; i++) {
+            int s = succs[i];
+            if (s < 0 || s >= n) continue;
+            if (!seen[s]) { seen[s] = 1; parent[s] = b; stack[sp++] = s; }
+        }
+    }
+    int bad = 0;
+    for (int b = 0; b < n && !bad; b++) {
+        if (!seen[b]) continue;
+        int succs[2], ns = 0; ir_succs(f, b, succs, &ns);
+        for (int i = 0; i < ns; i++) {
+            int s = succs[i];
+            if (s < 0 || s >= n || !seen[s]) continue;
+            /* Is s an ancestor of b in the DFS tree? */
+            int anc = 0, x = b, g = 0;
+            while (x >= 0 && g++ < n) { if (x == s) { anc = 1; break; } x = parent[x]; }
+            if (anc && !dominates(idom, s, b)) { bad = 1; break; }
+        }
+    }
+    free(parent); free(seen); free(stack);
+    return bad;
+}
+
 /* Cleaner while handling: second pass over BR that looks like a loop header. */
 static int is_loop_header(const IrFunc *f, int bi) {
     /* A back-edge comes from a later block (or the block itself). Forward
@@ -670,7 +793,11 @@ static void decompile_fun(D *d, Fun *fi) {
     for (int a = 0; a < fi->nargs; a++) fprintf(d->out, "%s%c", a ? ", " : "", 'a' + a);
     fprintf(d->out, ") {\n");
     for (int i = 0; i < fi->nslots; i++)
-        if (fi->slots[i].arg < 0) fprintf(d->out, "    let %s = 0;\n", fi->slots[i].name);
+        if (fi->slots[i].arg < 0) {
+            const char *h = fi->slots[i].hint == 1 ? " /* hint: array */" :
+                            fi->slots[i].hint == 2 ? " /* hint: pointer */" : "";
+            fprintf(d->out, "    let %s = 0;%s\n", fi->slots[i].name, h);
+        }
 
     /* reset env */
     for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
@@ -694,6 +821,18 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { fprintf(stderr, "rex: %s\n", err); rex_elf_free(&e); return _c; } }
     IrModule *m = x86_lift(&p, err, sizeof(err));
     if (!m) { fprintf(stderr, "rex: %s\n", err); cfg_free(&p); rex_elf_free(&e); return REX_E300_LIFT; }
+    for (int fi = 0; fi < m->nfuncs; fi++) {
+        if (strcmp(m->funcs[fi].name, "main") != 0 && m->funcs[fi].addr != p.main_addr) continue;
+        int *idom = compute_idom(&m->funcs[fi]);
+        if (idom && cfg_irreducible(&m->funcs[fi], idom)) {
+            free(idom);
+            int _e = rex_errf(err, sizeof(err), REX_E402_IRREDUCIBLE, "%s", m->funcs[fi].name);
+            fprintf(stderr, "rex: %s\n", err);
+            ir_module_free(m); cfg_free(&p); rex_elf_free(&e);
+            return _e;
+        }
+        free(idom);
+    }
     FILE *out = fopen(outpath, "w");
     if (!out) { fprintf(stderr, "rex: decompile: cannot write %s\n", outpath); ir_module_free(m); cfg_free(&p); rex_elf_free(&e); return REX_E600_DECOMPILE; }
 
