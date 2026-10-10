@@ -4,9 +4,20 @@ Audit of this tree. Version: 0.17.0 (`REX_VERSION` in `src/rex.c`). Every claim 
 
 ### REX vs Ghidra / Binary Ninja
 
-Stronger here: round-trip `compare`/`match` (optional `--ir`), plain-English refusals with stable `E` codes, a short everyday CLI, simple PE32+ look/show/rebuild, and a compile path that matches the recovery tools.
+Same comparison as the README table (primary artifact). REX is not a claim of parity.
 
-Weaker here: format/ISA breadth, no GUI or scripting, thin types/hints only, and deliberate refusals for packed/import-heavy/PIE binaries.
+| Aspect | REX | Ghidra |
+| --- | --- | --- |
+| Formats supported | ELF64 x86-64 non-PIE (`ET_EXEC`); simple static PE32+ x86-64 (no imports/relocs/TLS/.NET). Packed or odd RX sections refused (`E110`). | Many executable formats (ELF, PE, Mach-O, and others) through loaders and SLEIGH language definitions. |
+| ISA coverage | One machine: x86-64 subset used by REX and common gcc/clang `-O0`…`-O2` shapes (including `cmov`, `cdqe`/`movsxd`, `xchg`, shifts by `%cl`). Other ISAs not present. | Many ISAs via SLEIGH processors; coverage is broad and processor-pack driven. |
+| Recovery quality / round-trips | Best on REX-shaped binaries: lift → recompile/decompile with `compare` / `match` (optional `--ir`). `cmov` becomes a ternary; if/else/while via CFG + dominators; irreducible `main` → `E402`. Arbitrary binaries may be refused or only partly recovered. | Strong multi-pass decompiler and analyzer; excellent on a wide range of real-world binaries. No built-in “recompile and check stdout” loop like REX `compare`/`match`. |
+| Failure handling | Plain-English first line plus stable `E` code (`explain E101`); process exit status is the code. Deliberate refusals over silent wrong answers. | Rich logging, analysis options, and recoverable partial databases; errors are tool/UI oriented rather than a small fixed `E` table. |
+| CLI / interface | Short everyday CLI first (`look`, `show`, `rebuild`, `tosource`, `compare`, `match`, …). No GUI. | Full GUI plus headless/batch modes for automation. |
+| Verification | `compare` / `match` run both sides; `--ir` also diffs a normalized dump of `main`. | Programmatic checks and scripts possible; no single built-in binary/IR round-trip command analogous to REX. |
+| Size / dependencies | About **7.2k** lines of C in `src/`; release binary ~**222 KiB**; links **libc only** (`libc.so.6`). | Free/open source (Apache 2.0). Large install: JVM plus Ghidra distribution and optional native bits — not a single small binary. |
+| Type recovery | Optional hints only (`/* hint: array */`, `/* hint: pointer */` from scaled-index locals); clearly marked as hints. | Full type system: structures, typedefs, function signatures, applied types, and decompiler-driven recovery. |
+| Plugins / scripting | None. | Java and Python (Jython/PyGhidra) scripting, extensions, and analyzer plugins. |
+| Current hard limits | No PIE/shared objects, no Mach-O/ARM, no PE imports/relocs/TLS/.NET, no GUI/DB/scripting; packed PE refused; jump tables and many SSE/string ops still thin or refused. | Needs a capable host and JVM; steeper learning curve; not aimed at being a tiny self-hosted compile+recover loop. |
 
 ## Two pipelines
 

@@ -242,19 +242,22 @@ Decompile: names are invented. A call through a register prints the pointer expr
 
 ## REX vs Ghidra / Binary Ninja
 
-REX is smaller and stricter. It is not a replacement for those tools.
+REX is smaller and stricter. It is not a replacement for Ghidra (or Binary Ninja). The table is the primary comparison; the bullets above the CLI in this README stay the everyday entry point.
 
-Where REX is stronger today:
-- Built-in round-trip checks (`compare` / `match`, optional `--ir`)
-- Every refusal is a plain sentence plus a stable `E` code (`explain E101`)
-- A short everyday CLI (`look`, `show`, `rebuild`, `tosource`, …)
-- A working compile path for its own language that matches the recovery tools
+| Aspect | REX | Ghidra |
+| --- | --- | --- |
+| Formats supported | ELF64 x86-64 non-PIE (`ET_EXEC`); simple static PE32+ x86-64 (no imports/relocs/TLS/.NET). Packed or odd RX sections refused (`E110`). | Many executable formats (ELF, PE, Mach-O, and others) through loaders and SLEIGH language definitions. |
+| ISA coverage | One machine: x86-64 subset used by REX and common gcc/clang `-O0`…`-O2` shapes (including `cmov`, `cdqe`/`movsxd`, `xchg`, shifts by `%cl`). Other ISAs not present. | Many ISAs via SLEIGH processors; coverage is broad and processor-pack driven. |
+| Recovery quality / round-trips | Best on REX-shaped binaries: lift → recompile/decompile with `compare` / `match` (optional `--ir`). `cmov` becomes a ternary; if/else/while via CFG + dominators; irreducible `main` → `E402`. Arbitrary binaries may be refused or only partly recovered. | Strong multi-pass decompiler and analyzer; excellent on a wide range of real-world binaries. No built-in “recompile and check stdout” loop like REX `compare`/`match`. |
+| Failure handling | Plain-English first line plus stable `E` code (`explain E101`); process exit status is the code. Deliberate refusals over silent wrong answers. | Rich logging, analysis options, and recoverable partial databases; errors are tool/UI oriented rather than a small fixed `E` table. |
+| CLI / interface | Short everyday CLI first (`look`, `show`, `rebuild`, `tosource`, `compare`, `match`, …). No GUI. | Full GUI plus headless/batch modes for automation. |
+| Verification | `compare` / `match` run both sides; `--ir` also diffs a normalized dump of `main`. | Programmatic checks and scripts possible; no single built-in binary/IR round-trip command analogous to REX. |
+| Size / dependencies | About **7.2k** lines of C in `src/`; release binary ~**222 KiB**; links **libc only** (`libc.so.6`). | Free/open source (Apache 2.0). Large install: JVM plus Ghidra distribution and optional native bits — not a single small binary. |
+| Type recovery | Optional hints only (`/* hint: array */`, `/* hint: pointer */` from scaled-index locals); clearly marked as hints. | Full type system: structures, typedefs, function signatures, applied types, and decompiler-driven recovery. |
+| Plugins / scripting | None. | Java and Python (Jython/PyGhidra) scripting, extensions, and analyzer plugins. |
+| Current hard limits | No PIE/shared objects, no Mach-O/ARM, no PE imports/relocs/TLS/.NET, no GUI/DB/scripting; packed PE refused; jump tables and many SSE/string ops still thin or refused. | Needs a capable host and JVM; steeper learning curve; not aimed at being a tiny self-hosted compile+recover loop. |
 
-Where it is not:
-- Formats and ISAs (ELF x86-64 and simple static PE32+ only; no ARM, no Mach-O yet)
-- Packed PE, imports, relocs, TLS, .NET still refused on purpose
-- No GUI, no database, no scripting API
-- Types and structure recovery are thin; large/packed/import-heavy binaries are refused on purpose
+REX wins on built-in round-trips, a tiny libc-only binary, and honest `E`-coded refusals. Ghidra wins on format/ISA breadth, decompiler depth, types, GUI/headless, and scripting.
 
 ## Roadmap
 
