@@ -1371,10 +1371,12 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
             emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb));
             fputs(armA, d->out); emit(d, depth, "}");
         } else {
+            /* REX lowers if/else with the then-arm on the fall-through edge. */
+            c = ex_un("!", c);
             emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb));
-            fputs(armA, d->out);
-            emit(d, depth, "} else {");
             fputs(armB, d->out);
+            emit(d, depth, "} else {");
+            fputs(armA, d->out);
             emit(d, depth, "}");
         }
         ex_free(c); free(armA); free(armB);
