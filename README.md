@@ -1,14 +1,36 @@
 # REX
 
-REX is a small compiler. It turns a `.rex` file into a Linux program.
+REX is a small compiler and binary toolchain for x86-64 Linux. It turns a `.rex` file into an ELF, and it turns that ELF back into machine IR, a new ELF, or `.rex` source.
 
 It writes the program itself. It does not call gcc. It does not call an assembler. The finished file is an ELF that talks to the kernel directly.
 
-That is the point. chibicc, 8cc, and the Toomey tutorial stop at assembly and hand the rest to gcc. c4 interprets. TCC is a real C compiler and it is bigger. REX is not a C compiler. It is a finished compiler for a small language, in two files.
+That is the point. chibicc, 8cc, and the Toomey tutorial stop at assembly and hand the rest to gcc. c4 interprets. TCC is a real C compiler and it is bigger. REX is not a C compiler. It is a finished compiler for a small language, plus a loader, decoder, lifter, recompiler and decompiler for the binaries it makes.
 
 It is for Arch Linux. It also has a few XFCE files so Mousepad can color the code and you can open a `.rex` file from the menu.
 
 `examples/rexcomp.rex` is a smaller compiler written in REX. The C compiler builds it. That program compiles its own source, and the assembly matches. The compiler produced by that compile still prints 42 for `examples/stage.rex`. That is a fixed point of the subset compiler. It is not a self-host of `src/rex.c`.
+
+## Features
+
+- Compiler: `.rex` → AST → AT&T text → built-in assembler → ELF64. No gcc, no `as`, no libc in the output.
+- Checks: use before `let`, duplicate names, call arity, simple types (`rex check`). Errors carry a caret; several are reported per run.
+- ELF64 loader: reads headers and segments. Never runs the input.
+- x86-64 decoder and disassembler, with a control-flow graph per function.
+- Machine IR: architecture-independent, printed by `rex ir`.
+- x86 lift: x86-64 → machine IR.
+- Recompile: machine IR → fresh x86-64 code in a new segment → new ELF.
+- Decompile: machine IR → `.rex` source that rebuilds for simple programs.
+
+## Pipeline
+
+```
+.rex → lexer → parser → AST → codegen → AT&T text → assembler → ELF64
+                                                                 │
+ELF64 → loader → x86 decoder → CFG → x86 lift → machine IR ──┬─→ codegen → native ELF   (rex recompile)
+                                                             └─→ REX source            (rex decompile)
+```
+
+Front end: `src/rex.c`, `src/elf.c`. Back half: `elfread.c` → `x86_decode.c` → `cfg.c` → `x86_lift.c` → `ir.c` → `codegen.c` + `recompiler.c`, or `decompiler.c`.
 
 ## What you can write
 
@@ -101,7 +123,7 @@ make test
 sudo make install
 ```
 
-That puts `rex` in `/usr/local/bin`.
+That puts `rex` in `/usr/local/bin`. `make test` runs the unit tests (IR, ELF reader, decoder), every example, the `rexcomp` fixed point, and the recompile/decompile round trips.
 
 If you want it in `/usr` instead:
 
@@ -112,71 +134,101 @@ sudo make PREFIX=/usr install
 
 ## Use
 
-```
-rex run examples/loop.rex
-rex build examples/arithmetic.rex -o arith
-./arith
-rex asm examples/functions.rex
-```
-
-`rex run` builds the program, runs it, and deletes it. `rex build` keeps the program. `rex asm` only prints the assembly.
-
-`rex inspect` and `rex disasm` read an existing ELF. `rex recompile` lifts it through the machine IR and writes a new ELF. `rex decompile` writes a `.rex` file that often rebuilds for simple programs.
-
-## Files
-
-- `src/rex.c` is the compiler
-- `src/elf.c` is the assembler and the ELF writer
-- `src/ir.c` / `src/ir.h` is the machine IR (architecture-independent)
-- `src/elfread.c` is the ELF64 loader (reads; never runs the input)
-- `src/x86_decode.c` is the x86-64 decoder
-- `src/cfg.c` builds the control-flow graph
-- `src/x86_lift.c` lifts x86-64 into the machine IR
-- `src/codegen.c` encodes the IR back to x86-64
-- `src/recompiler.c` writes a new ELF from the IR
-- `src/decompiler.c` recovers REX source from the IR
-- `src/rexrt.c` is the old helper. The ELF path does not use it
-- `examples/` has test programs
-- `tests/` has unit tests for the IR, ELF reader and decoder
-- `share/` has the XFCE launcher and the Mousepad color file
-
-## Inspect, disassemble, recompile, decompile
+### Compile
 
 ```
-rex inspect program
-rex disasm program
-rex disasm --cfg program
-rex disasm --function main program
-rex ir program
-rex recompile program -o rebuilt
-rex decompile program -o recovered.rex
+rex run examples/loop.rex                  # build, run, delete
+rex build examples/arithmetic.rex -o arith # keep the binary
+rex check examples/retbad.rex              # parse and type-check only
+rex asm examples/functions.rex             # AT&T text to stdout
+rex elf prog.s -o prog                     # assemble REX-emitted text
+rex version
 ```
 
-The path is always:
+### Read a binary
 
 ```
-ELF → loader → x86 decoder → CFG → machine IR → native ELF
-                                         ↘ REX source
+rex inspect arith                  # ELF64 headers and segments
+rex disasm arith                   # all executable segments
+rex disasm --cfg arith             # functions and basic blocks
+rex disasm --function main arith   # one function: start, main, fn_ADDR, ADDR
+rex ir arith                       # lift to machine IR and print it
+rex ir --function main arith
 ```
 
-`rex recompile` keeps the original data segments at their old addresses and
-puts new code in a fresh segment. With `--poison` the old code bytes are
-filled with `int3`, so a matching run proves the new code is what executed.
+### Rebuild a binary
 
-`rex decompile` targets REX-built binaries. Names are invented. Runtime
-helpers become `print` / `putc` / `alloc` / `free`. Loops, arrays, pointers,
-globals, switches and function pointers are only partly recovered — see
-Limits. Simple arithmetic, branches, calls and returns round-trip today.
+```
+rex recompile arith -o arith.re            # new code, old data
+rex recompile --poison arith -o arith.re   # old code filled with int3
+rex recompile --debug arith -o arith.re    # per-function address map
+rex decompile arith -o arith.rex           # recovered source
+rex decompile --verbose arith -o arith.rex
+```
+
+Verified on `examples/arithmetic.rex`: the original, the `--poison` recompile, and `rex run arith.rex` all print the same six lines.
+
+```
+$ rex inspect arith
+ELF64 x86-64 executable
+Entry: 0x4005e6
+Size: 1852 bytes
+Executable segments: 1
+...
+$ rex ir --function main arith
+func fn_400078 @0x400078
+b0:  ; 0x400078
+    push rbp:8
+    mov rbp:8, rsp:8
+    sub rsp:8, rsp:8, 16
+    mov rax:8, 40
+    store [rbp - 8]:8, rax:8
+...
+$ rex decompile arith -o arith.rex && head -9 arith.rex
+// recovered by rex decompile
+// REX-built ELF64 only; names are invented
+
+fn main() {
+    let t1 = 0;
+    let t2 = 0;
+    t1 = 40;
+    t2 = 2;
+    print((t1 + t2));
+```
+
+`rex recompile` keeps the original data segments at their old addresses and puts new code in a fresh segment. With `--poison` the old code bytes are filled with `int3`, so a matching run proves the new code is what executed.
+
+`rex decompile` targets REX-built binaries. Names are invented. Runtime helpers are recognized by their syscalls and become `print` / `putc` / `alloc` / `free`. Simple arithmetic, branches, calls and returns round-trip today.
 
 ## Limits
 
-No nested structs. A struct stays in the function that created it, unless you pass its address. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
+Language: No nested structs. A struct stays in the function that created it, unless you pass its address. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
 
-The recompiler and decompiler start from ELF64 x86-64 Linux executables
-(ET_EXEC). Relocatable objects, PIE, shared libraries, Windows PE, ARM and
-game binaries are out of scope for now. The decoder covers the instructions
-REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test,
-jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). Unsupported
-opcodes stop the lift with a clear error. Indirect jumps are refused.
-Function-pointer calls keep working after recompile because the original
-code stays mapped; the decompiler turns them into opaque calls.
+Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. Windows PE, ARM and game binaries are out of scope.
+
+Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Indirect jumps are refused.
+
+Recompile: no pc-relative `lea`, no 8/16-bit shifts. Function-pointer calls keep working because the original code stays mapped.
+
+Decompile: names are invented. Function pointers become opaque `call(fn)`. Loops, arrays, pointers, globals and switches are only partly recovered; nested structs, switch and most pointer arithmetic stay opaque. Arbitrary binaries may be refused or give a stub that does not round-trip.
+
+## Files
+
+- `src/rex.c` is the compiler and the CLI
+- `src/elf.c` is the assembler, the ELF writer and the embedded runtime
+- `src/elfread.c` is the ELF64 loader (reads; never runs the input)
+- `src/inspect.c` is `rex inspect` and `rex disasm`
+- `src/x86_decode.c` is the x86-64 decoder
+- `src/cfg.c` builds the control-flow graph
+- `src/x86_lift.c` lifts x86-64 into the machine IR
+- `src/ir.c` / `src/ir.h` is the machine IR (architecture-independent)
+- `src/codegen.c` encodes the IR back to x86-64
+- `src/recompiler.c` writes a new ELF from the IR
+- `src/decompiler.c` recovers REX source from the IR
+- `src/rexrt.c` is the old readable runtime. The ELF path does not use it
+- `examples/` has test programs and expected output
+- `tests/` has unit tests for the IR, ELF reader and decoder
+- `share/` has the XFCE launcher and the Mousepad color file
+- `docs/compiler.md` is the architecture audit
+
+See [docs/compiler.md](docs/compiler.md) for the front-end design, global state, x86-64 assumptions and known bugs.
