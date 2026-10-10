@@ -8,7 +8,7 @@ override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
 
 SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/codegen.c src/recompiler.c src/decompiler.c src/inspect.c src/loader.c src/verify.c
 
-.PHONY: all install uninstall test unit clean
+.PHONY: all install uninstall test unit clean bench-decompile
 
 all: rex
 
@@ -177,6 +177,9 @@ test: rex unit
 	./rex run /tmp/leaf.dec.rex | cmp - /tmp/leaf.exp
 	rm -rf $(RT)
 	@echo "tests passed"
+
+bench-decompile: rex
+	python3 scripts/bench_decompile.py
 
 clean:
 	rm -f rex
