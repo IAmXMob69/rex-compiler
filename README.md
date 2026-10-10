@@ -232,7 +232,7 @@ fn main() {
 
 Language: No nested structs. A struct stays in the function that created it, unless you pass its address. `alloc` memory stays until `free`. It only makes x86-64 Linux programs. A function that calls itself forever will crash. REX will tell you the program was killed. This is not a C compiler.
 
-Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only; plus simple static PE32+ x86-64 for `look`/`show`/`ir`. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. Other PE shapes (i386/ARM, PE32, imports, relocs, TLS, .NET, packed) get plain-English `E1xx` refusals. `rebuild` of PE is `E502`. Other formats exit with code 2 and `unrecognized binary format: <hex>`. Function discovery still prefers REX-shaped prologues (`push rbp` / `endbr64`) when seeding from rip-relative lea/mov.
+Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only; plus simple static PE32+ x86-64 for `look`/`show`/`ir`. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. Other PE shapes (i386/ARM, PE32, imports, relocs, TLS, .NET, packed) get plain-English `E1xx` refusals. Simple static PE32+ can `rebuild` to a new PE (new `.rextext` section); packed/import-heavy shapes stay refused. Other formats exit with code 2 and `unrecognized binary format: <hex>`. Function discovery still prefers REX-shaped prologues (`push rbp` / `endbr64`) when seeding from rip-relative lea/mov.
 
 Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). Direct calls start functions; a rip-relative `lea`/`mov` also does, but only when its target starts with `push rbp` (0x55) or `endbr64`. The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Indirect jumps are refused.
 
@@ -252,12 +252,13 @@ Where REX is stronger today:
 
 Where it is not:
 - Formats and ISAs (ELF x86-64 and simple static PE32+ only; no ARM, no Mach-O yet)
+- Packed PE, imports, relocs, TLS, .NET still refused on purpose
 - No GUI, no database, no scripting API
 - Types and structure recovery are thin; large/packed/import-heavy binaries are refused on purpose
 
 ## Roadmap
 
-Done: ELF64 loader behind a registry, PE32+ x86-64 section load (static, no imports/relocs), numbered failure codes (E1xx–E6xx), machine IR, x86 lift including `cmovcc`/`leave`/`endbr`/`hlt`, recompile and decompile for REX-shaped binaries, `--verify` on recompile/decompile, CFG recursive descent from entry + call targets + ELF symbols, indirect jumps end a block instead of aborting the whole CFG.
+Done: ELF64 loader behind a registry, PE32+ x86-64 load + simple rebuild (`.rextext`), numbered failure codes (E1xx–E6xx), machine IR, x86 lift including `cmovcc`/`leave`/`endbr`/`hlt`/`cdqe`/`movsxd`/`xchg`, `compare`/`match --ir`, dominator check for irreducible CFG (`E402`), optional type hints in decompile, recompile and decompile for REX-shaped binaries, CFG recursive descent from entry + call targets + ELF symbols.
 
 Next (no schedule):
 

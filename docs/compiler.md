@@ -4,9 +4,9 @@ Audit of this tree. Version: 0.17.0 (`REX_VERSION` in `src/rex.c`). Every claim 
 
 ### REX vs Ghidra / Binary Ninja
 
-Stronger here: round-trip `compare`/`match` (optional `--ir`), plain-English refusals with stable `E` codes, a short everyday CLI, and a compile path that matches the recovery tools.
+Stronger here: round-trip `compare`/`match` (optional `--ir`), plain-English refusals with stable `E` codes, a short everyday CLI, simple PE32+ look/show/rebuild, and a compile path that matches the recovery tools.
 
-Weaker here: format/ISA breadth, no GUI or scripting, thin types, and deliberate refusals for packed/import-heavy/PIE binaries.
+Weaker here: format/ISA breadth, no GUI or scripting, thin types/hints only, and deliberate refusals for packed/import-heavy/PIE binaries.
 
 ## Two pipelines
 
@@ -73,7 +73,7 @@ This is the only runtime. The old libc `src/rexrt.c`, the dead `rt_path` lookup 
 | Name | Probe | Behavior |
 | --- | --- | --- |
 | `elf64` | `\x7fELF` | Full parse via `rex_elf_parse`. Same acceptance and refusals as before. |
-| `pe` | `MZ` at 0 and `PE\0\0` at `e_lfanew` | PE32+ x86-64 static images: section table → synthetic `PT_LOAD`, entry = ImageBase+EntryRVA, `.text` via `code_at`. Refuses i386/ARM (`E104`), PE32 (`E105`), imports (`E106`), relocs (`E107`), TLS (`E108`), .NET (`E109`), packed/no-X (`E110`). Rebuild of PE is `E502`. |
+| `pe` | `MZ` at 0 and `PE\0\0` at `e_lfanew` | PE32+ x86-64 static images: section table → synthetic `PT_LOAD`, entry = ImageBase+EntryRVA, `.text` via `code_at`. Refuses i386/ARM (`E104`), PE32 (`E105`), imports (`E106`), relocs (`E107`), TLS (`E108`), .NET (`E109`), packed/no-X (`E110`). Simple static PE rebuilds to a new PE32+ with a `.rextext` section; failure to emit cleanly is `E502`. |
 
 Anything else returns `REX_BIN_ERR_UNRECOGNIZED` (exit 2) with `unrecognized binary format: <up to 8 bytes as hex>`. Callers (`inspect`, `disasm`, `ir`, `recompile`, `decompile`) go through the registry and propagate those exit codes.
 
@@ -100,11 +100,11 @@ Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex
 | E302 | lift | idiv / div shape |
 | E400 | CFG | recovery failed |
 | E401 | CFG | indirect jump (reserved; today the block just ends) |
-| E402 | CFG | irreducible control flow (reserved) |
+| E402 | CFG / decompile | irreducible control flow in main |
 | E403 | CFG | address outside executable code |
 | E500 | recompile | encode / layout failure |
 | E501 | recompile | `--verify` / `--ir` mismatch |
-| E502 | recompile | PE rebuild not supported |
+| E502 | recompile | PE rebuild failed / not clean |
 | E600 | decompile | recovery failure |
 | E601 | decompile | `--verify` mismatch |
 
