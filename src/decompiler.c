@@ -19,6 +19,7 @@
  *   or produce a stub that does not round-trip.
  * - Names are invented (f1, a, b, t0...). Original names are gone.
  * - Calls through a register print the pointer expression, 2 args.
+ * - cmov becomes (cond ? src : old). hlt/ud2 become IR_TRAP and are dropped.
  * - Nested structs, switch, and most pointer arithmetic stay opaque.
  * - Runtime helpers (print, putc, alloc, ...) are recognized by
  *   syscalls and are not emitted; calls to them become builtins.
@@ -378,10 +379,19 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         break;
     }
     case IR_CMOV: {
-        /* REX has no ternary. Keep the source value; precise if/else recovery is future work. */
+        /* REX supports cond ? t : f (parsed as N_IF with num=1). */
         Ex src = op_ex(d, &in->a);
-        if (in->dst.kind == IR_O_REG) setr(d, in->dst.reg, src);
-        else ex_free(src);
+        Ex oldv = in->dst.kind == IR_O_REG ? getr(d, in->dst.reg) : ex("0");
+        Ex cond;
+        if (d->cmp && d->cmp->op == IR_CMP)
+            cond = ex_bin(cop(in->cc), op_ex(d, &d->cmp->a), op_ex(d, &d->cmp->b));
+        else if (d->cmp)
+            cond = in->cc == IR_CC_EQ ? ex_un("!", op_ex(d, &d->cmp->a)) : op_ex(d, &d->cmp->a);
+        else cond = ex("1");
+        Ex tern = exf("(%s ? %s : %s)", cond.s, src.s, oldv.s);
+        ex_free(cond); ex_free(src); ex_free(oldv);
+        if (in->dst.kind == IR_O_REG) setr(d, in->dst.reg, tern);
+        else ex_free(tern);
         break;
     }
     case IR_CALL: {
