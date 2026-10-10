@@ -6,13 +6,13 @@ CC     ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-function
 override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
 
-SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/inspect.c
+SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/codegen.c src/recompiler.c src/inspect.c
 
 .PHONY: all install uninstall test unit clean
 
 all: rex
 
-rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h src/x86_lift.h
+rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h src/x86_lift.h src/codegen.h src/recompiler.h
 	$(CC) $(CFLAGS) -o rex $(SRCS)
 	chmod +x rex
 
