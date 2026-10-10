@@ -76,7 +76,7 @@ IrOperand ir_abs(uint64_t addr) {
     IrOperand o = {0}; o.kind = IR_O_ADDR; o.addr = addr; o.base = o.index = IR_NOREG; return o;
 }
 
-int ir_is_terminator(IrOp op) { return op == IR_JMP || op == IR_BR || op == IR_RET; }
+int ir_is_terminator(IrOp op) { return op == IR_JMP || op == IR_BR || op == IR_RET || op == IR_TRAP; }
 
 static int bad(char *err, size_t n, const IrFunc *f, int b, const char *m) {
     if (err && n) snprintf(err, n, "%s: b%d: %s", f->name, b, m);
@@ -106,7 +106,7 @@ int ir_link(IrFunc *f, char *err, size_t errlen) {
                 if (t->a.block < 0 || t->a.block >= f->nblocks) return bad(err, errlen, f, i, "jump to missing block");
                 b->succ[b->nsucc++] = t->a.block;
             }
-        } else if (t->op != IR_RET) {
+        } else if (t->op != IR_RET && t->op != IR_TRAP) {
             if (i + 1 >= f->nblocks) return bad(err, errlen, f, i, "falls off end of function");
             b->succ[b->nsucc++] = i + 1;
         }
@@ -121,7 +121,7 @@ static const char *opnames[IR_OP_COUNT] = {
     "neg", "not", "zext", "sext",
     "cmp", "test", "setcc",
     "jmp", "br", "call", "ret",
-    "push", "pop", "syscall",
+    "push", "pop", "syscall", "trap",
 };
 static const char *ccnames[IR_CC_COUNT] = {
     "", "eq", "ne", "lt", "le", "gt", "ge", "ult", "ule", "ugt", "uge", "neg", "pos",

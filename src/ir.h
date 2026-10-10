@@ -49,6 +49,7 @@ typedef enum {
     IR_PUSH,    /* sp -= width; [sp] = a */
     IR_POP,     /* dst = [sp]; sp += width */
     IR_SYSCALL, /* platform call, registers per front end */
+    IR_TRAP,    /* never reached (after a process exit) */
     IR_OP_COUNT
 } IrOp;
 
@@ -63,7 +64,7 @@ typedef enum {
 typedef struct {
     IrOp op;
     IrCond cc;
-    IrOperand dst, a, b;
+    IrOperand dst, a, b;   /* call: a = target, b = return address */
     uint64_t origin;    /* source address or line, 0 if none */
 } IrInsn;
 

@@ -4,6 +4,7 @@
 #include "elfread.h"
 #include "x86_decode.h"
 #include "cfg.h"
+#include "x86_lift.h"
 
 /* rex inspect / rex disasm. Read-only: the input is never run. */
 
@@ -139,4 +140,24 @@ int rex_cmd_disasm(const char *path) {
     }
     rex_elf_free(&e);
     return 0;
+}
+
+int rex_cmd_ir(const char *path, const char *fname) {
+    RexElf e;
+    CfgProgram p;
+    char err[256];
+    if (rex_elf_open(path, &e, err, sizeof(err))) { fprintf(stderr, "rex: ir: %s\n", err); return 1; }
+    if (cfg_build(&e, &p, err, sizeof(err))) { fprintf(stderr, "rex: ir: %s\n", err); rex_elf_free(&e); return 1; }
+    IrModule *m = x86_lift(&p, err, sizeof(err));
+    int rc = 0;
+    if (!m) { fprintf(stderr, "rex: ir: %s\n", err); rc = 1; }
+    else {
+        int k = fname ? pick_func(&p, fname) : -1;
+        if (fname && k < 0) { fprintf(stderr, "rex: ir: no function '%s'\n", fname); rc = 1; }
+        for (int i = 0; i < m->nfuncs && !rc; i++) if (!fname || i == k) ir_print_func(stdout, m, &m->funcs[i]);
+        ir_module_free(m);
+    }
+    cfg_free(&p);
+    rex_elf_free(&e);
+    return rc;
 }
