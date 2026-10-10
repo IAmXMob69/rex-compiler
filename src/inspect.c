@@ -3,6 +3,7 @@
 #include <string.h>
 #include "elfread.h"
 #include "x86_decode.h"
+#include "cfg.h"
 
 /* rex inspect / rex disasm. Read-only: the input is never run. */
 
@@ -69,6 +70,51 @@ static void disasm_range(const RexElf *e, uint64_t va, const unsigned char *p, s
         printf("  %8llx:  %-22s %s\n", (unsigned long long)a, hex, text);
         i += (size_t)len;
     }
+}
+
+static void print_func(const CfgFunc *f) {
+    printf("%s @0x%llx: %d blocks, %d instructions\n", f->name, (unsigned long long)f->addr, f->nblocks, f->ninsns);
+    for (int b = 0; b < f->nblocks; b++) {
+        const CfgBlock *bl = &f->blocks[b];
+        printf("  block %d  0x%llx-0x%llx  ->", b, (unsigned long long)bl->start, (unsigned long long)bl->end);
+        if (!bl->nsucc) printf(bl->exits ? " exit" : " return");
+        for (int k = 0; k < bl->nsucc; k++) printf(" %d", bl->succ[k]);
+        printf("\n");
+        for (int i = 0; i < bl->n; i++) {
+            char text[160];
+            x86_format(&f->insns[bl->first + i], text, sizeof(text));
+            printf("    %8llx:  %s\n", (unsigned long long)f->insns[bl->first + i].addr, text);
+        }
+    }
+}
+
+/* name: start, main, fn_ADDR, or a hex address. */
+static int pick_func(const CfgProgram *p, const char *name) {
+    if (!strcmp(name, "main")) return p->main_addr ? cfg_find_func(p, p->main_addr) : -1;
+    for (int i = 0; i < p->nfuncs; i++) if (!strcmp(p->funcs[i].name, name)) return i;
+    char *end;
+    unsigned long long a = strtoull(name, &end, 16);
+    if (*name && !*end) return cfg_find_func(p, a);
+    return -1;
+}
+
+int rex_cmd_disasm_func(const char *path, const char *fname) {
+    RexElf e;
+    CfgProgram p;
+    char err[256];
+    if (rex_elf_open(path, &e, err, sizeof(err))) { fprintf(stderr, "rex: disasm: %s\n", err); return 1; }
+    if (cfg_build(&e, &p, err, sizeof(err))) { fprintf(stderr, "rex: disasm: %s\n", err); rex_elf_free(&e); return 1; }
+    int rc = 0;
+    if (!fname) {
+        for (int i = 0; i < p.nfuncs; i++) print_func(&p.funcs[i]);
+    } else {
+        int k = pick_func(&p, fname);
+        if (k < 0) { fprintf(stderr, "rex: disasm: no function '%s'\n", fname); rc = 1; }
+        else print_func(&p.funcs[k]);
+    }
+    cfg_free(&p);
+    rex_elf_free(&e);
+    return rc;
 }
 
 int rex_cmd_disasm(const char *path) {

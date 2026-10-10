@@ -6,13 +6,13 @@ CC     ?= gcc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wno-unused-function
 override CFLAGS += -DREX_PREFIX=\"$(PREFIX)\"
 
-SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/inspect.c
+SRCS = src/rex.c src/elf.c src/ir.c src/elfread.c src/x86_decode.c src/cfg.c src/inspect.c
 
 .PHONY: all install uninstall test unit clean
 
 all: rex
 
-rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h
+rex: $(SRCS) src/ir.h src/elfread.h src/x86_decode.h src/cfg.h
 	$(CC) $(CFLAGS) -o rex $(SRCS)
 	chmod +x rex
 
@@ -145,6 +145,8 @@ test: rex unit
 	./rex inspect /tmp/stage | grep -q 'Executable segments: 1'
 	./rex disasm /tmp/stage | grep -q syscall
 	! ./rex inspect Makefile 2>/tmp/rexin.err && grep -q 'bad magic' /tmp/rexin.err
+	./rex disasm --cfg /tmp/self2 | grep -q 'block'
+	./rex disasm --function main /tmp/stage | grep -q 'return'
 	@echo "tests passed"
 
 clean:

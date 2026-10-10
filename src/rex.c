@@ -2345,6 +2345,8 @@ static void usage(void) {
         "  rex elf <file.s> -o bin    assemble emitted assembly\n"
         "  rex inspect <elf>            show ELF64 headers and segments\n"
         "  rex disasm <elf>             disassemble executable segments\n"
+        "  rex disasm --cfg <elf>       functions and basic blocks\n"
+        "  rex disasm --function F <elf> one function (start, main, fn_ADDR, ADDR)\n"
         "  rex version\n",
         REX_VERSION);
     exit(2);
@@ -2427,6 +2429,7 @@ static int compile_to(const char *srcpath, const char *outbin) {
 
 int rex_cmd_inspect(const char *path);
 int rex_cmd_disasm(const char *path);
+int rex_cmd_disasm_func(const char *path, const char *fname);
 
 int main(int argc, char **argv) {
     if (argc < 2) usage();
@@ -2435,6 +2438,8 @@ int main(int argc, char **argv) {
         return rex_cmd_inspect(argv[2]);
     }
     if (strcmp(argv[1], "disasm") == 0) {
+        if (argc >= 4 && strcmp(argv[2], "--cfg") == 0) return rex_cmd_disasm_func(argv[3], NULL);
+        if (argc >= 5 && strcmp(argv[2], "--function") == 0) return rex_cmd_disasm_func(argv[4], argv[3]);
         if (argc < 3) usage();
         return rex_cmd_disasm(argv[2]);
     }
