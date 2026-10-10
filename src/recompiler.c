@@ -25,6 +25,10 @@ int rex_recompile(const char *inpath, const char *outpath, int debug) {
     CfgProgram p;
     char err[256];
     { int _rc = rex_bin_open(inpath, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: %s\n", err); return _rc; } }
+    if (e.type == 0xFE00) {
+        int _pe = rex_errf(err, sizeof(err), REX_E502_PE_REBUILD, "PE input");
+        fprintf(stderr, "rex: %s\n", err); rex_elf_free(&e); return _pe;
+    }
     { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { fprintf(stderr, "rex: %s\n", err); rex_elf_free(&e); return _c; } }
     IrModule *m = x86_lift(&p, err, sizeof(err));
     if (!m) { fprintf(stderr, "rex: %s\n", err); cfg_free(&p); rex_elf_free(&e); return REX_E300_LIFT; }

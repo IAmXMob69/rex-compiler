@@ -30,21 +30,25 @@ int rex_cmd_inspect(const char *path) {
     RexElf e;
     char err[256];
     { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: %s\n", err); return _rc; } }
-    printf("ELF64 x86-64 executable\n");
+    if (e.type == 0xFE00)
+        printf("PE32+ x86-64\n");
+    else
+        printf("ELF64 x86-64 executable\n");
     printf("Entry: 0x%llx\n", (unsigned long long)e.entry);
     printf("Size: %zu bytes\n", e.size);
     printf("Executable segments: %d\n", rex_elf_exec_segments(&e));
-    printf("Program headers: %d\n", e.nph);
+    printf("%s: %d\n", e.type == 0xFE00 ? "Sections" : "Program headers", e.nph);
     for (int i = 0; i < e.nph; i++) {
         const RexPhdr *h = &e.ph[i];
         char f[4];
         pflags(h->flags, f);
-        printf("  %-12s %s  off 0x%06llx  vaddr 0x%08llx  filesz 0x%06llx  memsz 0x%06llx\n", ptype(h->type), f,
+        const char *lab = (e.type == 0xFE00 && i < e.nsh && e.sh[i].name[0]) ? e.sh[i].name : ptype(h->type);
+        printf("  %-12s %s  off 0x%06llx  vaddr 0x%08llx  filesz 0x%06llx  memsz 0x%06llx\n", lab, f,
                (unsigned long long)h->offset, (unsigned long long)h->vaddr,
                (unsigned long long)h->filesz, (unsigned long long)h->memsz);
     }
-    printf("Sections: %d\n", e.nsh);
-    for (int i = 0; i < e.nsh; i++) {
+    if (e.type != 0xFE00) printf("Sections: %d\n", e.nsh);
+    for (int i = 0; e.type != 0xFE00 && i < e.nsh; i++) {
         const RexShdr *s = &e.sh[i];
         printf("  [%2d] %-20s type %-3u addr 0x%08llx  off 0x%06llx  size 0x%06llx\n", i, s->name[0] ? s->name : "-",
                s->type, (unsigned long long)s->addr, (unsigned long long)s->offset, (unsigned long long)s->size);

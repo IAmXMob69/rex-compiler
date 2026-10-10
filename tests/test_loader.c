@@ -41,16 +41,16 @@ int main(void) {
 
     /* PE x86-64 PE32+ */
     size_t n = make_pe(img, sizeof(img), 0x8664, 0x20b);
-    total++; fails += expect_fail(img, n, REX_BIN_ERR_PE_STUB, "E101:", "pe64");
-    total++; fails += expect_fail(img, n, REX_BIN_ERR_PE_STUB, "not implemented yet", "pe64-msg");
+    total++; fails += expect_fail(img, n, REX_E101_PE_STUB, "E101:", "pe64");
+    total++; fails += expect_fail(img, n, REX_E101_PE_STUB, "optional header", "pe64-msg");
 
     /* PE i386 PE32 */
     n = make_pe(img, sizeof(img), 0x14c, 0x10b);
-    total++; fails += expect_fail(img, n, REX_BIN_ERR_PE_STUB, "PE/COFF (i386, PE32)", "pei386");
+    total++; fails += expect_fail(img, n, REX_E104_PE_MACHINE, "E104:", "pei386");
 
     /* PE arm64 */
     n = make_pe(img, sizeof(img), 0xaa64, 0x20b);
-    total++; fails += expect_fail(img, n, REX_BIN_ERR_PE_STUB, "PE/COFF (arm64, PE32+)", "pearm64");
+    total++; fails += expect_fail(img, n, REX_E104_PE_MACHINE, "E104:", "pearm64");
 
     /* Probe only: MZ without PE signature is not PE and not ELF. */
     memset(img, 0, sizeof(img));
