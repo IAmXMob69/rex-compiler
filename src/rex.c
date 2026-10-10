@@ -2337,7 +2337,9 @@ static void print_help(void) {
         "  rex tosource <file> [-o out.rex]   turn a binary back into .rex\n"
         "  rex undo <file> [-o out.rex]       same as tosource\n"
         "  rex compare <file> [-o out]        rebuild and check it matches\n"
+        "  rex compare --ir <file>           same, but also compare the machine IR\n"
         "  rex match <file> [-o out.rex]      tosource, rebuild, check it matches\n"
+        "  rex match --ir <file>             same, but also compare the machine IR\n"
         "  rex explain E101                   plain English for an error code\n"
         "  rex help                           this help\n"
         "\n"
@@ -2441,12 +2443,12 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!strcmp(argv[1], "compare")) {
-        /* rebuild + verify */
         const char *in = NULL, *out = "a.out";
-        int debug = 0;
+        int debug = 0, want_ir = 0;
         for (int i = 2; i < argc; i++) {
             if (!strcmp(argv[i], "--debug")) debug |= 1;
             else if (!strcmp(argv[i], "--poison")) debug |= 2;
+            else if (!strcmp(argv[i], "--ir")) want_ir = 1;
             else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
             else in = argv[i];
         }
@@ -2456,15 +2458,21 @@ int main(int argc, char **argv) {
         char err[256];
         rc = rex_verify_bins(in, out, err, sizeof(err));
         if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
-        fprintf(stderr, "rex: compare: ok — the new binary matches\n");
+        if (want_ir) {
+            rc = rex_verify_ir(in, out, err, sizeof(err));
+            if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+            fprintf(stderr, "rex: compare: ok — the new binary and its IR match\n");
+        } else {
+            fprintf(stderr, "rex: compare: ok — the new binary matches\n");
+        }
         return 0;
     }
     if (!strcmp(argv[1], "match")) {
-        /* tosource + rebuild + verify */
         const char *in = NULL, *out = "out.rex";
-        int verbose = 0;
+        int verbose = 0, want_ir = 0;
         for (int i = 2; i < argc; i++) {
             if (!strcmp(argv[i], "--verbose")) verbose = 1;
+            else if (!strcmp(argv[i], "--ir")) want_ir = 1;
             else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
             else in = argv[i];
         }
@@ -2476,9 +2484,16 @@ int main(int argc, char **argv) {
         if (compile_to(out, tmp)) { unlink(tmp); return 1; }
         char err[256];
         rc = rex_verify_bins(in, tmp, err, sizeof(err));
-        unlink(tmp);
-        if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
-        fprintf(stderr, "rex: match: ok — the recovered source matches\n");
+        if (rc) { unlink(tmp); fprintf(stderr, "rex: %s\n", err); return rc; }
+        if (want_ir) {
+            rc = rex_verify_ir(in, tmp, err, sizeof(err));
+            unlink(tmp);
+            if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+            fprintf(stderr, "rex: match: ok — the recovered source and its IR match\n");
+        } else {
+            unlink(tmp);
+            fprintf(stderr, "rex: match: ok — the recovered source matches\n");
+        }
         return 0;
     }
     if (strcmp(argv[1], "inspect") == 0) {
@@ -2515,11 +2530,12 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "recompile") == 0) {
         const char *in = NULL, *out = "a.out";
-        int debug = 0, verify = 0;
+        int debug = 0, verify = 0, want_ir = 0;
         for (int i = 2; i < argc; i++) {
             if (!strcmp(argv[i], "--debug")) debug |= 1;
             else if (!strcmp(argv[i], "--poison")) debug |= 2;
             else if (!strcmp(argv[i], "--verify")) verify = 1;
+            else if (!strcmp(argv[i], "--ir")) want_ir = 1;
             else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
             else in = argv[i];
         }
@@ -2529,7 +2545,11 @@ int main(int argc, char **argv) {
         char err[256];
         rc = rex_verify_bins(in, out, err, sizeof(err));
         if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
-        fprintf(stderr, "rex: compare: ok — the new binary matches\n");
+        if (want_ir) {
+            rc = rex_verify_ir(in, out, err, sizeof(err));
+            if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+        }
+        fprintf(stderr, "rex: compare: ok — the new binary%s matches\n", want_ir ? " and its IR" : "");
         return 0;
     }
     if (strcmp(argv[1], "disasm") == 0) {

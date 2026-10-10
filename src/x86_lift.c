@@ -181,15 +181,30 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         zext32(l, d);
         break;
     case X86_IDIV: {
-        /* The dividend is rdx:rax. Find what last set rdx in this block:
-         * cqo (sign of rax) or xor edx,edx (zero), with rax untouched
-         * after a cqo. */
+        /* The dividend is rdx:rax. Accept in this block:
+         *   cqo;  xor edx,edx (+ optional mov edx,edx zext);
+         *   or mov rdx,rax ; sar rdx,63  (what CQO lowers to in IR/codegen). */
         int ok = 0, rax_changed = 0;
         const X86Insn *bi = l->cf->insns;
         for (int k = (int)(in - bi) - 1; k >= l->bfirst; k--) {
             const X86Insn *q = &bi[k];
             if (q->op == X86_CQO && q->ops[0].size == 8) { ok = rax_changed ? 0 : 1; break; }
             if (q->op == X86_XOR && q->ops[0].kind == XO_REG && q->ops[1].kind == XO_REG && q->ops[0].reg == 2 && q->ops[1].reg == 2) { ok = 2; break; }
+            /* mov edx,edx (any width) is a no-op / zext; keep scanning. */
+            if (q->op == X86_MOV && q->nops >= 2 && q->ops[0].kind == XO_REG && q->ops[1].kind == XO_REG
+                && q->ops[0].reg == 2 && q->ops[1].reg == 2) continue;
+            /* sar rdx, 63 then look for a prior mov rdx, rax (skipping no-ops). */
+            if (q->op == X86_SAR && q->nops >= 2 && q->ops[0].kind == XO_REG && q->ops[0].reg == 2
+                && q->ops[1].kind == XO_IMM && (q->ops[1].imm & 63) == 63) {
+                for (int j = k - 1; j >= l->bfirst; j--) {
+                    const X86Insn *m = &bi[j];
+                    if (m->op == X86_MOV && m->nops >= 2 && m->ops[0].kind == XO_REG && m->ops[0].reg == 2
+                        && m->ops[1].kind == XO_REG && m->ops[1].reg == 0) { ok = rax_changed ? 0 : 1; break; }
+                    int wr = m->nops > 0 && m->ops[0].kind == XO_REG ? m->ops[0].reg : -1;
+                    if (wr == 2 || wr == 0 || m->op == X86_CALL || m->op == X86_SYSCALL) break;
+                }
+                break;
+            }
             int wr = q->nops > 0 && q->ops[0].kind == XO_REG ? q->ops[0].reg : -1;
             if (wr == 2 || q->op == X86_CALL || q->op == X86_SYSCALL || q->op == X86_IDIV || q->op == X86_DIV || q->op == X86_POP) break;
             if (wr == 0) rax_changed = 1;  /* fine for the xor edx form only */
