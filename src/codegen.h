@@ -11,7 +11,7 @@
  * function address; the ELF writer in recompiler.c places them.
  */
 
-typedef struct { int at; uint64_t target; int kind; } CgReloc;  /* kind: 0 rel32 */
+typedef struct { int at; uint64_t target; int kind; } CgReloc;  /* kind: 0 rel32 call, 100+n local block n */
 
 typedef struct {
     unsigned char *code;

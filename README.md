@@ -210,7 +210,7 @@ Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithme
 
 Recompile: no pc-relative `lea`, no 8/16-bit shifts. Function-pointer calls keep working because the original code stays mapped.
 
-Decompile: names are invented. Function pointers become opaque `call(fn)`. Loops, arrays, pointers, globals and switches are only partly recovered; nested structs, switch and most pointer arithmetic stay opaque. Arbitrary binaries may be refused or give a stub that does not round-trip.
+Decompile: names are invented. A call through a register prints the pointer expression with two arguments. Loops, arrays, pointers, globals and switches are only partly recovered; nested structs, switch and most pointer arithmetic stay opaque. Arbitrary binaries may be refused or give a stub that does not round-trip.
 
 ## Files
 
@@ -225,10 +225,10 @@ Decompile: names are invented. Function pointers become opaque `call(fn)`. Loops
 - `src/codegen.c` encodes the IR back to x86-64
 - `src/recompiler.c` writes a new ELF from the IR
 - `src/decompiler.c` recovers REX source from the IR
-- `src/rexrt.c` is the old readable runtime. The ELF path does not use it
+- `src/rexrt.c` is the old libc runtime. Nothing links it; `make install` still copies it
 - `examples/` has test programs and expected output
 - `tests/` has unit tests for the IR, ELF reader and decoder
 - `share/` has the XFCE launcher and the Mousepad color file
 - `docs/compiler.md` is the architecture audit
 
-See [docs/compiler.md](docs/compiler.md) for the front-end design, global state, x86-64 assumptions and known bugs.
+See [docs/compiler.md](docs/compiler.md) for the front end, both pipelines, the machine IR, lift rules, runtime, global state and known issues.

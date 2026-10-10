@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 /* REX — a small native compiler for Arch.
- * Integer language, SysV AMD64, libc runtime.
+ * Integer language, SysV AMD64, syscall-only runtime embedded in elf.c.
  * No LLVM. The empire does not rent its code generator.
  */
 

@@ -16,8 +16,8 @@
  * Honest limits:
  * - Built for REX's own ELF64 output. Arbitrary binaries may refuse
  *   or produce a stub that does not round-trip.
- * - Names are invented (a, b, t0...). Original names are gone.
- * - Function pointers become `call(fn)`.
+ * - Names are invented (f1, a, b, t0...). Original names are gone.
+ * - Calls through a register print the pointer expression, 2 args.
  * - Nested structs, switch, and most pointer arithmetic stay opaque.
  * - Runtime helpers (print, putc, alloc, ...) are recognized by
  *   syscalls and are not emitted; calls to them become builtins.

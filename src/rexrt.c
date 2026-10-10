@@ -2,7 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* REX runtime. Linked into every binary the compiler emits. */
+/* Old libc REX runtime, kept for reference. Nothing links it: the runtime
+ * that runs is the string embedded in src/elf.c, and the two drift. */
 
 void rex_print_int(long x) {
     printf("%ld\n", x);
