@@ -176,6 +176,7 @@ test: rex unit
 	printf '42\n' > /tmp/leaf.exp
 	./rex run /tmp/leaf.dec.rex | cmp - /tmp/leaf.exp
 	sh tests/golden.sh
+	sh tests/game.sh
 	rm -rf $(RT)
 	@echo "tests passed"
 
