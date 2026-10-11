@@ -21,8 +21,18 @@ typedef struct {
 } CfgBlock;
 
 typedef struct {
+    uint64_t at;            /* address of the jmp *T(,r,8) */
+    int reg;                /* index register, or the register holding the loaded target */
+    int byaddr;             /* 1: jmp *reg after mov reg, T(,i,8): compare reg with targets */
+    int n;                  /* entries: index 0..n-1 */
+    uint64_t *targets;
+} CfgJumpTable;
+
+typedef struct {
     uint64_t addr;
     char name[32];
+    CfgJumpTable *jt;       /* recovered jump tables */
+    int njt;
     X86Insn *insns;         /* sorted by address */
     int ninsns;
     CfgBlock *blocks;

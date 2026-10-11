@@ -91,6 +91,8 @@ int cfg_find_func(const CfgProgram *p, uint64_t addr) {
     return -1;
 }
 
+static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, CfgJumpTable *jt);
+
 static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, size_t errlen) {
     Map seen = {0};
     AddrList work = {0}, leaders = {0};
@@ -101,6 +103,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
         uint64_t a = work.v[--work.n];
         const X86Insn *prev = NULL;
         X86Insn prevbuf;
+        X86Insn hist[4]; int nhist = 0;
         for (;;) {
             if (map_get(&seen, a) >= 0) break;
             size_t avail;
@@ -123,7 +126,28 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
             uint64_t next = a + (uint64_t)in->size;
             if (in->op == X86_RET || in->op == X86_HLT || in->op == X86_UD2) break;
             if (in->op == X86_JMP) {
-                if (in->ops[0].kind != XO_REL) break; /* E401 avoided: end block, no successors */
+                if (in->ops[0].kind != XO_REL) {
+                    CfgJumpTable jt;
+                    int jr = jump_table(e, in, hist, nhist, &jt);
+                    /* jmp *reg that is not a table dispatch: an indirect tail jump
+                     * (crt code does this). The block ends with no successors. */
+                    const X86Operand *jo = &in->ops[0];
+                    int tablelike = jo->kind == XO_MEM && jo->index != X86_NOREG && jo->scale == 8;
+                    if (jr == 1 && !tablelike) break;   /* also PLT-style jmp *GOT(%rip) */
+                    if (jr) {
+                        rex_errf(err, errlen, REX_E401_INDIRECT_JMP, "%s: indirect jump at 0x%llx (%s)", f->name,
+                                 (unsigned long long)in->addr,
+                                 jr == 1 ? "no bounds check right before it" : jr == 2 ? "table is not in a read-only section" :
+                                 "a table entry is not code");
+                        goto out;
+                    }
+                    CfgJumpTable *nj = realloc(f->jt, (size_t)(f->njt + 1) * sizeof(*nj));
+                    if (!nj) { free(jt.targets); goto oom; }
+                    f->jt = nj; f->jt[f->njt++] = jt;
+                    for (int k = 0; k < jt.n; k++)
+                        if (al_push(&work, jt.targets[k]) || al_push(&leaders, jt.targets[k])) goto oom;
+                    break;
+                }
                 if (al_push(&work, in->ops[0].target) || al_push(&leaders, in->ops[0].target)) goto oom;
                 break;
             }
@@ -146,6 +170,8 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
             if (cfg_is_exit(prev, in)) { if (al_push(&leaders, next)) goto oom; break; }
             prevbuf = *in;
             prev = &prevbuf;
+            if (nhist == 4) { memmove(hist, hist + 1, 3 * sizeof(X86Insn)); nhist = 3; }
+            hist[nhist++] = *in;
             a = next;
         }
     }
@@ -220,8 +246,79 @@ out:
     return rc;
 }
 
+/* Bound from "cmp|sub x, N-1; ja default" in the recent history. */
+static int ja_bound(const X86Insn *hist, int nhist, int reg) {
+    for (int k = nhist - 1; k >= 1; k--) {
+        const X86Insn *ja = &hist[k], *cmp = &hist[k - 1];
+        if (ja->op != X86_JCC || ja->cc != 7) continue;
+        if (cmp->op != X86_CMP && !(reg < 0 && cmp->op == X86_SUB)) return -1;
+        if (cmp->ops[0].kind != XO_REG || (reg >= 0 && cmp->ops[0].reg != reg) || cmp->ops[1].kind != XO_IMM) return -1;
+        if (cmp->ops[1].imm < 0 || cmp->ops[1].imm > 1024) return -1;
+        return (int)cmp->ops[1].imm + 1;
+    }
+    return -1;
+}
+
+/* Non-PIE gcc/clang switch tables:
+ *   cmp r, N-1; ja default; [mov r32,r32]; jmp *T(,r,8)            (gcc, clang -O1+)
+ *   cmp|sub x, N-1; ja default; ...; mov q, T(,i,8); jmp *q          (clang -O0)
+ * T must lie in a read-only allocated section and every entry must be code.
+ * Returns 0 and fills jt, or 1 no bound / unknown shape, 2 table not
+ * read-only, 3 bad entry. */
+static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, CfgJumpTable *jt) {
+    const X86Operand *o = &in->ops[0];
+    memset(jt, 0, sizeof(*jt));
+    int n, reg, byaddr = 0;
+    if (o->kind == XO_REG && o->size == 8) {
+        if (nhist < 1) return 1;
+        const X86Insn *ld = &hist[nhist - 1];
+        if (ld->op != X86_MOV || ld->ops[0].kind != XO_REG || ld->ops[0].reg != o->reg || ld->ops[1].kind != XO_MEM) return 1;
+        reg = o->reg; byaddr = 1;
+        o = &ld->ops[1];
+        if (o->base != X86_NOREG || o->index == X86_NOREG || o->scale != 8) return 1;
+        n = ja_bound(hist, nhist - 1, -1);
+    } else {
+        if (o->kind != XO_MEM || o->base != X86_NOREG || o->index == X86_NOREG || o->scale != 8) return 1;
+        reg = o->index;
+        n = ja_bound(hist, nhist, reg);
+        /* only harmless moves after the bound check */
+        for (int j = nhist - 1; j >= 0 && n > 0; j--) {
+            const X86Insn *m = &hist[j];
+            if (m->op == X86_JCC) break;
+            int same = m->op == X86_MOV && m->ops[0].kind == XO_REG && m->ops[1].kind == XO_REG && m->ops[0].reg == reg && m->ops[1].reg == reg;
+            int other = m->nops >= 1 && m->ops[0].kind == XO_REG && m->ops[0].reg != reg && m->op != X86_CALL;
+            if (!same && !other) return 1;
+        }
+    }
+    if (n < 0) return 1;
+    uint64_t t = (uint64_t)o->disp;
+    const RexShdr *sec = NULL;
+    for (int i = 0; i < e->nsh; i++) {
+        const RexShdr *s = &e->sh[i];
+        if ((s->flags & 2) && !(s->flags & 1) && s->type != 8 && t >= s->addr && t + 8 * (uint64_t)n <= s->addr + s->size) sec = s;
+    }
+    if (!sec) return 2;
+    uint64_t off = sec->offset + (t - sec->addr);
+    if (off + 8 * (uint64_t)n > e->size) return 2;
+    jt->targets = malloc((size_t)n * sizeof(uint64_t));
+    if (!jt->targets) return 3;
+    for (int k = 0; k < n; k++) {
+        uint64_t v;
+        memcpy(&v, e->data + off + 8 * (uint64_t)k, 8);
+        size_t av;
+        if (!rex_elf_code_at(e, v, &av) || v > 0x7fffffff) { free(jt->targets); jt->targets = NULL; return 3; }
+        jt->targets[k] = v;
+    }
+    jt->at = in->addr; jt->reg = reg; jt->n = n; jt->byaddr = byaddr;
+    return 0;
+}
+
 void cfg_free(CfgProgram *p) {
-    for (int i = 0; i < p->nfuncs; i++) { free(p->funcs[i].insns); free(p->funcs[i].blocks); }
+    for (int i = 0; i < p->nfuncs; i++) {
+        free(p->funcs[i].insns); free(p->funcs[i].blocks);
+        for (int k = 0; k < p->funcs[i].njt; k++) free(p->funcs[i].jt[k].targets);
+        free(p->funcs[i].jt);
+    }
     free(p->funcs);
     memset(p, 0, sizeof(*p));
 }

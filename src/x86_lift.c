@@ -299,7 +299,29 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         l->flags = FL_NONE;
         break;
     case X86_JMP: {
-        if (in->ops[0].kind != XO_REL) { emit(l, IR_TRAP); break; }
+        if (in->ops[0].kind != XO_REL) {
+            const CfgJumpTable *jt = NULL;
+            for (int k = 0; k < l->cf->njt; k++) if (l->cf->jt[k].at == in->addr) jt = &l->cf->jt[k];
+            if (!jt) { emit(l, IR_TRAP); break; }  /* indirect tail jump (see cfg.c) */
+            /* Table dispatch as a compare chain: index k -> targets[k]. The bounds
+             * check before the jmp keeps the index in 0..n-1, so the last entry
+             * is unconditional. Extra blocks are appended after the CFG blocks. */
+            int saved = l->block;
+            for (int k = 0; k < jt->n; k++) {
+                int tb = cfg_find_block(l->cf, jt->targets[k]);
+                if (tb < 0) { lfail(l, "jump table target not in function"); break; }
+                if (k == jt->n - 1) { i = emit(l, IR_JMP); i->a = ir_blk(tb); break; }
+                i = emit(l, IR_CMP); i->a = ir_reg(jt->reg, 8);
+                i->b = jt->byaddr ? ir_imm((int64_t)jt->targets[k], 4) : ir_imm(k, 4);
+                int nb = ir_block_add(l->f, in->addr);
+                if (nb < 0) { lfail(l, "out of memory"); break; }
+                i = emit(l, IR_BR); i->cc = IR_CC_EQ; i->a = ir_blk(tb); i->b = ir_blk(nb);
+                l->block = nb;
+            }
+            l->block = saved;
+            l->flags = FL_NONE;
+            break;
+        }
         int t = cfg_find_block(l->cf, in->ops[0].target);
         if (t < 0) { lfail(l, "jump target not in function"); break; }
         i = emit(l, IR_JMP); i->a = ir_blk(t);
@@ -362,6 +384,9 @@ IrModule *x86_lift(const CfgProgram *p, char *err, size_t errlen) {
                 for (int s = 0; s < pb->nsucc; s++)
                     if (pb->succ[s] == b) { pred = p; npred++; }
             }
+            for (int k = 0; k < cf->njt; k++)
+                for (int j = 0; j < cf->jt[k].n; j++)
+                    if (cf->jt[k].targets[j] == bl->start) npred = 99;
             if (npred == 1 && out_fl[pred] == FL_CMP) {
                 const CfgBlock *pb = &cf->blocks[pred];
                 if (pb->n > 0) {
