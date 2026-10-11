@@ -236,6 +236,20 @@ static Ex ex_mask(Ex e, int width) {
     char suf[32]; snprintf(suf, sizeof suf, " & %llu)", m);
     size_t L = strlen(e.s), S = strlen(suf);
     if (L > S && !strcmp(e.s + L - S, suf) && e.s[0] == '(') return e;
+    /* already narrower: "(x & k)" at the top level with k = 2^n-1 <= m */
+    if (e.s[0] == '(' && L > 3 && e.s[L - 1] == ')') {
+        const char *amp = strrchr(e.s, '&');
+        long long k;
+        char num[32];
+        if (amp && amp > e.s + 1 && amp[-1] == ' ' && amp[1] == ' ' && (size_t)(e.s + L - 1 - (amp + 2)) < sizeof num) {
+            memcpy(num, amp + 2, (size_t)(e.s + L - 1 - (amp + 2)));
+            num[e.s + L - 1 - (amp + 2)] = 0;
+            int depth = 0, top = 1;
+            for (const char *q = e.s + 1; q < amp; q++) { if (*q == '(') depth++; else if (*q == ')') { if (--depth < 0) top = 0; } }
+            if (top && depth == 0 && is_num(num, &k) && k >= 0 && (unsigned long long)k <= m && ((unsigned long long)k & ((unsigned long long)k + 1)) == 0) return e;
+        }
+    }
+
     Ex r = exf("(%s & %llu)", e.s, m);
     ex_free(e);
     return r;
