@@ -268,6 +268,10 @@ Next (no schedule):
 4. PIE / shared objects / relocations.
 5. Later: Mach-O, ARM64, RISC-V.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Everyday commands: `make`, `make test`, `make bench-decompile`, and `sh tests/golden.sh --update` when you change decompiler output on purpose. REX is MIT licensed; see [LICENSE](LICENSE).
+
 ## Files
 
 - `src/rex.c` is the compiler and the CLI
