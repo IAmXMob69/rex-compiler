@@ -2,7 +2,7 @@
 """Decompile quality benchmark for REX.
 
 Corpus: buildable REX examples + gcc/clang -O0/-O1/-O2 samples under
-/tmp/isa-samples (or BENCH_ISA_DIR). Metrics per binary:
+/tmp/isa-samples (or BENCH_ISA_DIR) + game-like samples from bench/game. Metrics per binary:
   decompile_ok, match_ok, match_ir_ok, loc, temps, raw_ir_fallbacks
 """
 from __future__ import annotations
@@ -76,6 +76,36 @@ def isa_bins():
             bins.append(("isa:" + p.name, p))
     return bins
 
+GAME_SRC = ROOT / "bench" / "game"
+GAME = Path(os.environ.get("BENCH_GAME_DIR", "/tmp/rex-game-samples"))
+
+def game_bins():
+    """Game-like C samples (bench/game/*.c): static, non-PIE, freestanding ELF
+    from gcc and clang at -O0/-O1/-O2. PE32+ only when mingw is installed."""
+    GAME.mkdir(parents=True, exist_ok=True)
+    bins = []
+    for src in sorted(GAME_SRC.glob("*.c")):
+        for cc in ("gcc", "clang"):
+            if not shutil_which(cc):
+                continue
+            for opt in ("O0", "O1", "O2"):
+                out = GAME / f"{src.stem}_{cc}_{opt}"
+                if not out.exists() or out.stat().st_mtime < src.stat().st_mtime:
+                    run([cc, f"-{opt}", "-static", "-nostdlib", "-fno-pie", "-ffreestanding",
+                         "-fno-stack-protector", "-I", str(GAME_SRC), "-o", str(out), str(src)])
+                if out.exists():
+                    bins.append((f"game:{out.name}", out))
+        mingw = shutil_which("x86_64-w64-mingw32-gcc")
+        if mingw:
+            for opt in ("O0", "O1", "O2"):
+                out = GAME / f"{src.stem}_mingw_{opt}.exe"
+                if not out.exists():
+                    run([mingw, f"-{opt}", "-static", "-nostdlib", "-ffreestanding", "-e", "_start",
+                         "-o", str(out), str(src)])
+                if out.exists():
+                    bins.append((f"game:{out.name}", out))
+    return bins
+
 def bench_one(label: str, path: Path):
     dec = OUT_DIR / "dec" / (path.name + ".dec.rex")
     dec.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +141,7 @@ def main():
         print("rex binary missing; run make first", file=sys.stderr)
         return 2
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    corpus = rex_examples() + isa_bins()
+    corpus = rex_examples() + isa_bins() + game_bins()
     rows = [bench_one(lab, p) for lab, p in corpus]
     # summary
     n = len(rows)
