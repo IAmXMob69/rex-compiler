@@ -174,13 +174,13 @@ Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` outpu
 4. String ops (`movs`, `stos`, `rep` prefixes) — likely refused with a clear error for a long time.
 5. `bt` / `bts` / `btr` / `btc`, `xchg`, `cmpxchg`, `xadd`.
 6. General rip-relative memory in more ops; PIC/PLT call shapes.
-7. Jump tables (switch) — CFG work as much as decode work.
+7. Done: non-PIE jump tables (`jmp *T(,r,8)` after `cmp`/`ja`, and clang -O0's load-then-`jmp *reg`).
 8. SSE/AVX moves used as GPR spills (`movdqa`/`movaps` to stack).
 
 ## Roadmap (tool)
 
 1. Real PE section and import parsing; then PE → the same IR subset.
-2. Done: dominator/postdominator structuring (while, do-while, while(1) + break/continue, if/else, REX switch), array/struct/pointer hints, `make bench-decompile`, golden tests. Measured on the benchmark corpus: REX examples `match` 29/43 and `match --ir` 26/43 (was 20 and 13); gcc/clang samples 0/36. Next: jump tables, `&&`/`||` chains and rotated loops from optimized compilers; `.eh_frame` seeds. Keep the REX path as the high-quality case.
+2. Done: dominator/postdominator structuring (while, do-while, while(1) + break/continue, if/else, REX switch), array/struct/pointer hints, `make bench-decompile`, golden tests. Measured on the benchmark corpus: REX examples `match` 29/43 and `match --ir` 26/43 (was 20 and 13); gcc/clang samples 0/36. Phase 6 done: non-PIE jump tables (compare chain in the IR, `switch` in the decompiler, `E401` when the table is unclear), `cltd`/32-bit `idiv`, register variables `vN`, globals `g_ADDR` and exact 8/16/32-bit widths for non-REX binaries, and `bench/game` samples (gcc+clang, -O0/-O1/-O2, static non-PIE). Measured: game samples `match` 6/36 (was 0/36), `match --ir` 0/36. Next: `&&`/`||` chains, rotated loops, stack and global arrays, struct-array fields, SSE/vector code, unsigned `div`, `.eh_frame` seeds. Keep the REX path as the high-quality case.
 3. PIE, shared objects, relocations.
 4. Mach-O, ARM64, RISC-V — each behind the same loader registry.
 

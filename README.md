@@ -264,7 +264,7 @@ Next (no schedule):
 
 1. Real PE section/import parsing (then PE → IR for the same x86-64 subset).
 2. Fuller x86-64: SSE moves, more imul forms, string ops, `bt*`, `xchg`/`cmpxchg`, PIC/PLT calls, jump tables.
-3. Structuring for optimized gcc/clang code: jump tables, `&&`/`||` chains, loop rotation; `.eh_frame` seeds. Today gcc/clang -O0..-O2 samples decompile but none pass `match` (benchmark: 0/36).
+3. Optimized gcc/clang code. Done: non-PIE jump tables (rebuilt as compare chains, decompiled as `switch`; unclear tables are `E401`), `cltd` and 32-bit `idiv`, register variables and exact C widths for non-REX binaries, game-like benchmark samples (`bench/game`). Measured: game samples `match` 6/36 (was 0/36), `match --ir` 0/36; the small gcc/clang samples still 0/36. Next: `&&`/`||` chains, loop rotation, stack arrays and global arrays, struct-array fields, SSE/vector code (now `E200`), unsigned `div` (now `E302`), `.eh_frame` seeds.
 4. PIE / shared objects / relocations.
 5. Later: Mach-O, ARM64, RISC-V.
 
