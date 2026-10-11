@@ -220,7 +220,7 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         const X86Insn *bi = l->cf->insns;
         for (int k = (int)(in - bi) - 1; k >= l->bfirst; k--) {
             const X86Insn *q = &bi[k];
-            if (q->op == X86_CQO && q->ops[0].size == 8) { ok = rax_changed ? 0 : 1; break; }
+            if (q->op == X86_CQO && q->ops[0].size == d.width && (d.width == 8 || d.width == 4)) { ok = rax_changed ? 0 : 1; break; }
             if (q->op == X86_XOR && q->ops[0].kind == XO_REG && q->ops[1].kind == XO_REG && q->ops[0].reg == 2 && q->ops[1].reg == 2) { ok = 2; break; }
             /* mov edx,edx (any width) is a no-op / zext; keep scanning. */
             if (q->op == X86_MOV && q->nops >= 2 && q->ops[0].kind == XO_REG && q->ops[1].kind == XO_REG
@@ -242,6 +242,18 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
             if (wr == 0) rax_changed = 1;  /* fine for the xor edx form only */
         }
         if (!ok) { lfail(l, "idiv dividend high half (rdx) not from cqo or xor edx"); break; }
+        if (d.width == 4 && !(d.kind == IR_O_REG && (d.reg == 0 || d.reg == 2 || d.reg == 11))) {
+            /* 32-bit idiv: sign-extend both sides, divide at 64 bits, zero-extend
+             * the results (eax/edx writes). Only INT_MIN / -1 differs (x86 traps). */
+            wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8)); wrote(l, ir_reg(11, 8));
+            i = emit(l, IR_SEXT); i->dst = ir_reg(11, 8); i->a = d;
+            i = emit(l, IR_SEXT); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 4);
+            i = emit(l, IR_REMS); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
+            i = emit(l, IR_DIVS); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
+            zext32(l, ir_reg(0, 4)); zext32(l, ir_reg(2, 4));
+            l->flags = FL_NONE;
+            break;
+        }
         if (d.width != 8 || (d.kind == IR_O_REG && (d.reg == 0 || d.reg == 2))) { lfail(l, "idiv form not supported"); break; }
         wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8));
         i = emit(l, IR_REMS); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = d;
@@ -253,7 +265,14 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         lfail(l, "unsigned div is not supported");
         break;
     case X86_CQO:
-        if (in->ops[0].size != 8) { lfail(l, "cltd/cwtd not supported"); break; }
+        if (in->ops[0].size == 4) {  /* cltd: edx = sign bits of eax */
+            wrote(l, ir_reg(2, 8));
+            i = emit(l, IR_MOV); i->dst = ir_reg(2, 4); i->a = ir_reg(0, 4);
+            i = emit(l, IR_SAR); i->dst = ir_reg(2, 4); i->a = ir_reg(2, 4); i->b = ir_imm(31, 1);
+            zext32(l, ir_reg(2, 4));
+            break;
+        }
+        if (in->ops[0].size != 8) { lfail(l, "cwtd not supported"); break; }
         wrote(l, ir_reg(2, 8));
         i = emit(l, IR_MOV); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8);
         i = emit(l, IR_SAR); i->dst = ir_reg(2, 8); i->a = ir_reg(2, 8); i->b = ir_imm(63, 1);

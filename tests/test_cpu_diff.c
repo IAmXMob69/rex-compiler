@@ -359,6 +359,23 @@ int main(void) {
         __asm__ volatile("mov %1, %%eax; cltq; mov %%rax, %0" : "=r"(ext) : "r"(neg) : "rax");
         g_cases++; if (ext != (int64_t)neg) g_fail++; else g_ok++;
     }
+    {
+        /* cltd + 32-bit idiv vs the lift model: sign-extend, 64-bit divide, zero-extend */
+        static const int32_t vs[] = {0, 1, -1, 7, -7, 100, -100, 2147483647, -2147483647, 12345, -98765};
+        unsigned char cltd[] = {0x99};
+        X86Insn ci;
+        g_cases++; if (x86_decode(cltd,1,0x1000,&ci)<=0||ci.op!=X86_CQO||ci.ops[0].size!=4) g_fail++; else g_ok++;
+        for (size_t i = 0; i < sizeof vs / sizeof vs[0]; i++)
+            for (size_t j = 0; j < sizeof vs / sizeof vs[0]; j++) {
+                if (vs[j] == 0) continue;
+                uint32_t q, r;
+                __asm__ volatile("mov %2, %%eax; cltd; idivl %3; mov %%eax, %0; mov %%edx, %1"
+                                 : "=r"(q), "=r"(r) : "r"(vs[i]), "r"(vs[j]) : "rax", "rdx");
+                int64_t a = vs[i], b = vs[j];
+                uint32_t mq = (uint32_t)(uint64_t)(a / b), mr = (uint32_t)(uint64_t)(a % b);
+                g_cases++; if (q != mq || r != mr) g_fail++; else g_ok++;
+            }
+    }
     printf("cpu diff: %d ok, %d fail, %d cases\n", g_ok, g_fail, g_cases);
     return g_fail?1:0;
 }
