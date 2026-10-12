@@ -234,11 +234,11 @@ Language: No nested structs. A struct stays in the function that created it, unl
 
 Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only; plus simple static PE32+ x86-64 for `look`/`show`/`ir`. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. Other PE shapes (i386/ARM, PE32, imports, relocs, TLS, .NET, packed) get plain-English `E1xx` refusals. Simple static PE32+ can `rebuild` to a new PE (new `.rextext` section); packed/import-heavy shapes stay refused. Other formats exit with code 2 and `unrecognized binary format: <hex>`. Function discovery still prefers REX-shaped prologues (`push rbp` / `endbr64`) when seeding from rip-relative lea/mov.
 
-Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo, syscall, movzx/movsx). Direct calls start functions; a rip-relative `lea`/`mov` also does, but only when its target starts with `push rbp` (0x55) or `endbr64`. The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Indirect jumps are refused.
+Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo/cltd, 32-bit idiv, syscall, movzx/movsx), plus non-PIE jump tables in the CFG. Direct calls start functions; a rip-relative `lea`/`mov` also does, but only when its target starts with `push rbp` (0x55) or `endbr64`. The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Unclear jump tables are `E401`; other indirect jumps end the block.
 
 Recompile: no pc-relative `lea`, no 8/16-bit shifts. Function-pointer calls keep working because the original code stays mapped.
 
-Decompile: names are invented. A call through a register prints the pointer expression with two arguments. Loops, arrays, pointers, globals and switches are only partly recovered; nested structs, switch and most pointer arithmetic stay opaque. Arbitrary binaries may be refused or give a stub that does not round-trip.
+Decompile: names are invented. A call through a register prints the pointer expression with two arguments. Loops, if/else, and switch (REX chains and non-PIE jump tables) are recovered; arrays, pointers and globals are partial; nested structs and most pointer arithmetic stay opaque. Arbitrary binaries may be refused or give a stub that does not round-trip.
 
 ## REX vs Ghidra / Binary Ninja
 

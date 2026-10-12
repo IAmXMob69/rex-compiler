@@ -99,7 +99,7 @@ Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex
 | E300 | lift | cannot model instruction exactly |
 | E302 | lift | idiv / div shape |
 | E400 | CFG | recovery failed |
-| E401 | CFG | indirect jump (reserved; today the block just ends) |
+| E401 | CFG | jump table unclear (no bounds check, not read-only, or non-code entry); known non-PIE tables become a compare chain |
 | E402 | CFG / decompile | irreducible control flow in main (hard failure); in other functions, nesting too deep to structure prints an `// E402` comment at that point |
 | E403 | CFG | address outside executable code |
 | E500 | recompile | encode / layout failure |
@@ -118,7 +118,7 @@ No silent partial output: a failure returns the code and prints the message. `--
 
 The decoder turns bytes into `X86Insn` with destination-first operands. It covers what REX emits: mov, movzx/movsx, lea, push/pop, add/sub/and/or/xor, shl/shr/sar, inc/dec, neg/not, imul, idiv/div, cqo, cmp/test, jmp/jcc, call, ret, setcc, syscall, nop.
 
-`cfg_build` does recursive descent from the entry point, then seeds more addresses from ELF `SYMTAB`/`DYNSYM` function symbols (paired with `.strtab`/`.dynstr`). No linear sweep. Direct calls start new functions; jumps stay inside the function. A rip-relative `lea` or `mov` also starts a function when the target begins with `push rbp` (0x55) or `endbr64`. Indirect jumps end the current block with no successors (they do not abort the whole CFG). `hlt`/`ud2` are terminators. Symbol names rename functions; `main` sets `main_addr` when present, else it stays the first direct call from the entry.
+`cfg_build` does recursive descent from the entry point, then seeds more addresses from ELF `SYMTAB`/`DYNSYM` function symbols (paired with `.strtab`/`.dynstr`). No linear sweep. Direct calls start new functions; jumps stay inside the function. A rip-relative `lea` or `mov` also starts a function when the target begins with `push rbp` (0x55) or `endbr64`. Non-PIE gcc/clang jump tables (`cmp`/`ja` then `jmp *T(,r,8)`, or clang -O0 load-then-`jmp *reg`) are read from a read-only section when every entry is code and become a compare chain; unclear table-shaped jumps are `E401`. Other indirect jumps (`jmp *reg`, PLT `jmp *GOT(%rip)`) end the current block with no successors (they do not abort the whole CFG). `hlt`/`ud2` are terminators. Symbol names rename functions; `main` sets `main_addr` when present, else it stays the first direct call from the entry.
 
 ## Machine IR (`src/ir.h`, `src/ir.c`)
 
@@ -139,11 +139,12 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 - `mov` becomes `LOAD`, `STORE` or `MOV` by operand kind. `lea` becomes `ADDR`.
 - A 32-bit write is followed by an explicit `ZEXT` (`zext32`); 8/16-bit writes keep the upper bits.
 - ALU ops are three-address (`dst = dst op src`). `inc`/`dec` become `ADD`/`SUB` 1.
-- `cqo` becomes `MOV rdx, rax; SAR rdx, 63`. `idiv` becomes `REMS` then `DIVS`, only if rdx was last set by `cqo` (rax untouched) or `xor edx, edx` in the same block.
+- `cqo` becomes `MOV rdx, rax; SAR rdx, 63`. `cltd` (32-bit) sets `edx` to the sign bits of `eax` then zero-extends.
+- `idiv`: 64-bit form is `REMS` then `DIVS` when rdx came from `cqo`/`cltd` (rax untouched) or `xor edx, edx` in the same block. 32-bit form sign-extends both sides, divides at 64 bits, and zero-extends eax/edx (only `INT_MIN/-1` differs from hardware).
 - When a branch reads flags from an ALU result instead of cmp/test, `need_flags` inserts the matching `TEST`.
 - `jcc` must end its block and becomes `BR taken, fallthrough`. `call` keeps its return address in `b`. An exit syscall is followed by `TRAP`.
 - `nop` / `endbr64` / `endbr32` emit nothing. `leave` becomes `mov rsp, rbp; pop rbp`.
-- Refused with an error: `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cltd`/`cwtd`, other `idiv` forms, 16-bit push/pop, unmapped conditions, odd branch shapes, jumps outside the function, any unlisted instruction.
+- Refused with an error: `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cwtd`, other `idiv` forms, 16-bit push/pop, unmapped conditions, odd branch shapes, jumps outside the function, any unlisted instruction.
 
 ## Recompiler (`src/codegen.c`, `src/recompiler.c`)
 
@@ -161,11 +162,11 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 - Argument-register stores are not hidden as prologue (`is_prolog`), so parameter spills stay visible.
 - Parameters come from early stores of argument registers to `[rbp-…]`: `a`, `b`, `c`, …. Other stack slots become `t<N>`.
 
-`step` evaluates IR symbolically into expressions; `walk2` rebuilds `if`/`else` (via `find_join`) and `while` (via `is_loop_header`). Prologue and epilogue are dropped. Calls to unrecognized helpers such as `rex_fail` are dropped. A call through a register prints the pointer expression called with two arguments. Output starts with two `//` header lines. `--verbose` prints each function's kind, argument count and builtin.
+`step` evaluates IR symbolically into expressions; `walk2` rebuilds `if`/`else` (via `find_join`), `while` (via `is_loop_header`), and `switch` from REX push/compare chains or lifted jump-table compare chains. Prologue and epilogue are dropped. Calls to unrecognized helpers such as `rex_fail` are dropped. A call through a register prints the pointer expression called with two arguments. Output starts with two `//` header lines. `--verbose` prints each function's kind, argument count and builtin.
 
 ## x86-64 decoder / lift roadmap
 
-Present today (decoder + lift unless noted): the REX emission set, plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32`, `leave`, `hlt`/`ud2`, `cmovcc` (IR_CMOV), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate, `setcc`, `cqo`, shifts by imm and by `%cl`.
+Present today (decoder + lift unless noted): the REX emission set, plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32`, `leave`, `hlt`/`ud2`, `cmovcc` (IR_CMOV), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate, `setcc`, `cqo`/`cltd`, 32-bit `idiv`, shifts by imm and by `%cl`, and non-PIE jump tables in the CFG.
 
 Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` output:
 
@@ -179,7 +180,7 @@ Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` outpu
 
 ## Roadmap (tool)
 
-1. Real PE section and import parsing; then PE → the same IR subset.
+1. PE imports/relocs (today: static PE32+ sections only, imports refused); richer PE → the same IR subset.
 2. Done: dominator/postdominator structuring (while, do-while, while(1) + break/continue, if/else, REX switch), array/struct/pointer hints, `make bench-decompile`, golden tests. Measured on the benchmark corpus: REX examples `match` 29/43 and `match --ir` 26/43 (was 20 and 13); gcc/clang samples 0/36. Phase 6 done: non-PIE jump tables (compare chain in the IR, `switch` in the decompiler, `E401` when the table is unclear), `cltd`/32-bit `idiv`, register variables `vN`, globals `g_ADDR` and exact 8/16/32-bit widths for non-REX binaries, and `bench/game` samples (gcc+clang, -O0/-O1/-O2, static non-PIE). Measured: game samples `match` 6/36 (was 0/36), `match --ir` 0/36. Next: `&&`/`||` chains, rotated loops, stack and global arrays, struct-array fields, SSE/vector code, unsigned `div`, `.eh_frame` seeds. Keep the REX path as the high-quality case.
 3. PIE, shared objects, relocations.
 4. Mach-O, ARM64, RISC-V — each behind the same loader registry.
@@ -195,8 +196,8 @@ Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` outpu
 | Constants | `#define NAME integer`, char literals, enum | typed constants, const |
 | Strings | literals, index, len, equality | safe string type, formatting |
 | Output | x86-64 Linux ELF, one RWX load | objects, relocations, ARM64, PE, Mach-O |
-| Binary input | ELF64 x86-64 `ET_EXEC`; PE recognition stub | PE load, PIE, shared objects, Mach-O, other arches |
-| Back half | inspect, disasm, CFG, IR, recompile, decompile | optimization, full decompile of loops/arrays/switch |
+| Binary input | ELF64 x86-64 `ET_EXEC`; simple static PE32+ (look/show/ir/rebuild) | PE imports/relocs/TLS/.NET/packed, PIE, shared objects, Mach-O, other arches |
+| Back half | inspect, disasm, CFG, IR, recompile, decompile (loops/if/switch partly) | optimization, full array/struct and `&&`/`||` recovery |
 | Tools | `run build check asm elf inspect disasm ir recompile decompile version help`, aliases `look show rebuild tosource undo`, Mousepad spec | fmt, lint, lsp, package manager |
 | Tests | example outputs, negative diagnostics, `rexcomp` fixed point, unit tests (IR, ELF reader, decoder), differential CPU tests, recompile and decompile round trips | fuzz, diagnostic snapshots |
 
@@ -211,7 +212,7 @@ Lexer and parser state is local. The rest of `src/rex.c` is file-scope: `g_out`,
 - One RWX segment. No W^X.
 - `exec` is `fork` plus `/bin/sh -c`. That is a security footgun; do not feed it outside input.
 - Recompile and decompile are designed for REX's own output. Other binaries usually stop at the lift or the encoder with an error.
-- Decompile partly recovers loops, arrays, pointers and globals. Switch, nested structs and most pointer arithmetic stay opaque. Names are invented.
+- Decompile recovers loops, if/else, and switch (REX chains and non-PIE jump tables). Arrays, pointers and globals are partial. Nested structs and most pointer arithmetic stay opaque. Names are invented.
 - No optimization anywhere. No second architecture: instruction names, syscall numbers and ELF headers are inline.
 
 ## Known issues
