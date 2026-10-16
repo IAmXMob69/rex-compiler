@@ -27,6 +27,11 @@ if command -v clang >/dev/null 2>&1; then
     ./rex match "$T/rng_clang_O1" -o "$T/rc.rex" >/dev/null
     build clang O1 collide
     ./rex match "$T/collide_clang_O1" -o "$T/c.rex" >/dev/null
+    # clang -O0: memory operands on imul/add/cmp and movslq from memory
+    for s in tilemap statemachine entities; do
+        build clang O0 $s
+        ./rex compare "$T/${s}_clang_O0" -o "$T/c0.re" >/dev/null
+    done
 fi
 # global array (data sections in gmem) and memory read-modify-write at -O0
 for o in O0 O1; do

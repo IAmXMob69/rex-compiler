@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "codegen.h"
+#include "rex_err.h"
 
 typedef struct {
     CgResult *r;
@@ -16,7 +17,9 @@ typedef struct {
 static void cgfail(Cg *g, const char *fmt, ...) {
     if (g->bad) return;
     g->bad = 1;
-    va_list ap; va_start(ap, fmt); vsnprintf(g->err, g->errlen, fmt, ap); va_end(ap);
+    char detail[160];
+    va_list ap; va_start(ap, fmt); vsnprintf(detail, sizeof detail, fmt, ap); va_end(ap);
+    rex_errf(g->err, g->errlen, REX_E500_RECOMPILE, "%s", detail);
 }
 
 static void eb(Cg *g, unsigned b) {
@@ -204,8 +207,49 @@ static int alu_base(IrOp op) {
     switch (op) { case IR_ADD: return 0x00; case IR_OR: return 0x08; case IR_AND: return 0x20; case IR_SUB: return 0x28; case IR_XOR: return 0x30; default: return -1; }
 }
 
+/* immediate of an 0x80/0x81/0x83 group-1 op */
+static void imm_tail(Cg *g, int w, int64_t imm, int short8) {
+    if (short8) eb(g, (unsigned)(int8_t)imm);
+    else if (w == 1) eb(g, (unsigned)(imm & 0xff));
+    else if (w == 2) { eb(g, (unsigned)(imm & 0xff)); eb(g, (unsigned)((imm >> 8) & 0xff)); }
+    else e32(g, (uint32_t)imm);
+}
+/* op [mem], reg (dir 0) or op reg, [mem] (dir 2) for opcode base op */
+static void alu_mem_reg(Cg *g, int op, int dir, const IrOperand *mem, const IrOperand *r) {
+    int w = r->width;
+    if (w == 2) eb(g, 0x66);
+    mem_rex(g, w, r->reg, mem, w == 1 && byte_needs_rex(r->reg) && r->reg < 8);
+    eb(g, (unsigned)(op | dir | (w == 1 ? 0 : 1)));
+    modrm_mem(g, r->reg, mem);
+}
+/* group-1 /ext [mem], imm */
+static void alu_mem_imm(Cg *g, int ext, const IrOperand *mem, int64_t imm) {
+    int w = mem->width;
+    int short8 = w != 1 && imm >= -128 && imm <= 127;
+    if (w == 2) eb(g, 0x66);
+    mem_rex(g, w, 0, mem, 0);
+    eb(g, w == 1 ? 0x80 : short8 ? 0x83 : 0x81);
+    modrm_mem(g, ext, mem);
+    imm_tail(g, w, imm, short8);
+}
+
+static int same_mem(const IrOperand *x, const IrOperand *y) {
+    return x->kind == IR_O_MEM && y->kind == IR_O_MEM && x->base == y->base && x->index == y->index &&
+           x->scale == y->scale && x->disp == y->disp && x->width == y->width;
+}
+
 static void gen_arith(Cg *g, const IrInsn *in) {
     const IrOperand *d = &in->dst, *a = &in->a, *b = &in->b;
+    if (same_mem(d, a)) {  /* add [mem], reg/imm */
+        if (b->kind == IR_O_REG) alu_mem_reg(g, alu_base(in->op), 0, d, b);
+        else if (b->kind == IR_O_IMM) alu_mem_imm(g, alu_ext(in->op), d, b->imm);
+        else cgfail(g, "arith memory form");
+        return;
+    }
+    if (d->kind == IR_O_REG && a->kind == IR_O_REG && d->reg == a->reg && b->kind == IR_O_MEM) {
+        alu_mem_reg(g, alu_base(in->op), 2, b, d);  /* add reg, [mem] */
+        return;
+    }
     if (!(d->kind == IR_O_REG && a->kind == IR_O_REG && d->reg == a->reg)) { cgfail(g, "arith expects dst==a register"); return; }
     if (b->kind == IR_O_REG) gen_alu_rr(g, alu_base(in->op), d, b);
     else if (b->kind == IR_O_IMM) alu_imm(g, alu_ext(in->op), d->reg, d->width, b->imm);
@@ -251,7 +295,19 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
         case IR_SHL: case IR_SHR: case IR_SAR: gen_shift(g, in); break;
         case IR_MUL: {
             const IrOperand *d = &in->dst;
-            if (in->b.kind == IR_O_IMM) {
+            if (d->kind != IR_O_REG || d->width < 2) { cgfail(g, "imul destination must be a 16/32/64-bit register"); break; }
+            if (d->width == 2) eb(g, 0x66);
+            if (in->b.kind == IR_O_IMM && in->a.kind == IR_O_MEM) {   /* imul r, [mem], imm */
+                int s8 = in->b.imm >= -128 && in->b.imm <= 127;
+                mem_rex(g, d->width, d->reg, &in->a, 0);
+                eb(g, s8 ? 0x6b : 0x69); modrm_mem(g, d->reg, &in->a);
+                if (s8) eb(g, (unsigned)(int8_t)in->b.imm); else if (d->width == 2) { eb(g, (unsigned)(in->b.imm & 255)); eb(g, (unsigned)((in->b.imm >> 8) & 255)); } else e32(g, (uint32_t)in->b.imm);
+            } else if (in->b.kind == IR_O_MEM && in->a.kind == IR_O_REG && in->a.reg == d->reg) {  /* imul r, [mem] */
+                mem_rex(g, d->width, d->reg, &in->b, 0);
+                eb(g, 0x0f); eb(g, 0xaf); modrm_mem(g, d->reg, &in->b);
+            } else if (in->b.kind == IR_O_REG && !(in->a.kind == IR_O_REG && in->a.reg == d->reg)) {
+                cgfail(g, "imul expects dst==a register");
+            } else if (in->b.kind == IR_O_IMM) {
                 rex(g, width_w(d->width), hi(d->reg), 0, hi(in->a.kind == IR_O_REG ? in->a.reg : d->reg));
                 int sr = in->a.kind == IR_O_REG ? in->a.reg : d->reg;
                 if (in->b.imm >= -128 && in->b.imm <= 127) { eb(g, 0x6b); modrm_rr(g, d->reg, sr); eb(g, (unsigned)(int8_t)in->b.imm); }
@@ -290,7 +346,12 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
             else cgfail(g, "zext form");
             break;
         case IR_SEXT:
-            if (in->a.kind == IR_O_REG) { int w=in->a.width; if (w == 1) rex_byte_src(g, width_w(in->dst.width), in->dst.reg, in->a.reg); else rex(g, width_w(in->dst.width), hi(in->dst.reg), 0, hi(in->a.reg)); eb(g,0x0f); eb(g, w==1?0xbe:0xbf); modrm_rr(g, in->dst.reg, in->a.reg); }
+            if (in->a.width == 4 && in->dst.width == 8 && in->a.kind == IR_O_REG) {  /* movsxd */
+                rex(g, 1, hi(in->dst.reg), 0, hi(in->a.reg)); eb(g, 0x63); modrm_rr(g, in->dst.reg, in->a.reg);
+            } else if (in->a.width == 4 && in->dst.width == 8 && in->a.kind == IR_O_MEM) {
+                mem_rex(g, 8, in->dst.reg, &in->a, 0); eb(g, 0x63); modrm_mem(g, in->dst.reg, &in->a);
+            } else if (in->a.width == 4) cgfail(g, "sext from 32 bits needs a 64-bit destination");
+            else if (in->a.kind == IR_O_REG) { int w=in->a.width; if (w == 1) rex_byte_src(g, width_w(in->dst.width), in->dst.reg, in->a.reg); else rex(g, width_w(in->dst.width), hi(in->dst.reg), 0, hi(in->a.reg)); eb(g,0x0f); eb(g, w==1?0xbe:0xbf); modrm_rr(g, in->dst.reg, in->a.reg); }
             else if (in->a.kind == IR_O_MEM) { int w=in->a.width; mem_rex(g,8,in->dst.reg,&in->a,0); eb(g,0x0f); eb(g, w==1?0xbe:0xbf); modrm_mem(g,in->dst.reg,&in->a); }
             else cgfail(g, "sext form");
             break;
@@ -312,7 +373,13 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
             } else if (a->kind == IR_O_MEM) {
                 int w = a->width;
                 if (in->op==IR_CMP && b->kind==IR_O_IMM){ if(w==2)eb(g,0x66); mem_rex(g,w,0,a,0); eb(g, w==1?0x80:0x81); modrm_mem(g,7,a); if(w==1)eb(g,b->imm&255); else if(w==2){eb(g,b->imm&255);eb(g,(b->imm>>8)&255);} else e32(g,(uint32_t)b->imm); }
-                else cgfail(g, "cmp/test mem form");
+                else if (b->kind == IR_O_REG) alu_mem_reg(g, op, 0, a, b);             /* cmp/test [mem], reg */
+                else if (in->op == IR_TEST && b->kind == IR_O_IMM) {
+                    if (w == 2) eb(g, 0x66);
+                    mem_rex(g, w, 0, a, 0); eb(g, w == 1 ? 0xf6 : 0xf7); modrm_mem(g, 0, a); imm_tail(g, w, b->imm, 0);
+                } else cgfail(g, "cmp/test mem form");
+            } else if (a->kind == IR_O_REG && b->kind == IR_O_MEM) {
+                alu_mem_reg(g, op, in->op == IR_CMP ? 2 : 0, b, a);                 /* cmp reg, [mem]; test is symmetric */
             } else cgfail(g, "cmp/test form");
             break;
         }
