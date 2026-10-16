@@ -188,6 +188,8 @@ typedef struct {
     int bound;          /* array length proven for the block being emitted */
     int nstruct;
     int need_udiv;      /* emit the udiv/urem helpers */
+    int blob;           /* foreign: data sections live in one heap block gmem */
+    uint64_t blo, bhi;  /* address range of that block */
     int foreign;        /* not REX-built (has section headers): register variables, exact widths */
     const RexElf *elf;
     struct { uint64_t addr; int width; long long init; } glob[256];
@@ -241,6 +243,9 @@ static Ex getr(D *d, int r) {
 static Ex ex_mask(Ex e, int width) {
     long long v;
     if (width >= 8) return e;
+    /* non-PIE code moves data addresses through 32-bit registers; gmem is a
+     * 64-bit heap pointer, so an address-valued expression keeps all bits */
+    if (width == 4 && mentions_v(e.s, "gmem") && !strstr(e.s, "*(")) return e;
     unsigned long long m = width == 4 ? 4294967295ULL : width == 2 ? 65535ULL : 255ULL;
     if (is_num(e.s, &v) && v >= 0 && (unsigned long long)v <= m) return e;
     char suf[32]; snprintf(suf, sizeof suf, " & %llu)", m);
@@ -341,6 +346,47 @@ static int data_addr(const D *d, uint64_t a, long long *init, int width) {
     }
     return 0;
 }
+/* Foreign code that indexes or takes the address of data gets the data
+ * sections copied into one heap block (gmem); addresses become offsets. */
+#define BLOB_SLACK 256  /* end pointers (one past the last row) stay inside gmem */
+static int in_blob(const D *d, int64_t v) { return d->blob && (uint64_t)v >= d->blo && (uint64_t)v < d->bhi + BLOB_SLACK; }
+static Ex daddr(D *d, int64_t v) {
+    if (in_blob(d, v)) return exf("(gmem + %llu)", (unsigned long long)((uint64_t)v - d->blo));
+    return exf("%lld", (long long)v);
+}
+static void blob_range(D *d) {
+    d->blo = ~0ULL; d->bhi = 0;
+    for (int i = 0; d->elf && i < d->elf->nsh; i++) {
+        const RexShdr *s = &d->elf->sh[i];
+        if (!(s->flags & 2) || (s->flags & 4) || s->addr < 0x1000 || !s->size) continue;
+        if (!(s->flags & 1) && strncmp(s->name, ".rodata", 7)) continue;  /* data, bss, rodata only */
+        if (s->addr < d->blo) d->blo = s->addr;
+        if (s->addr + s->size > d->bhi) d->bhi = s->addr + s->size;
+    }
+    if (d->bhi <= d->blo || d->bhi - d->blo > (1u << 20)) d->blo = d->bhi = 0;
+}
+static int op_points_data(const D *d, const IrOperand *o) {
+    if (o->kind == IR_O_IMM) return o->width >= 4 && (uint64_t)o->imm >= d->blo && (uint64_t)o->imm < d->bhi;
+    if (o->kind == IR_O_MEM) return (o->base != IR_NOREG || o->index != IR_NOREG) && o->base != 4 && o->base != 5 &&
+        (uint64_t)o->disp >= d->blo && (uint64_t)o->disp < d->bhi;
+    return 0;
+}
+static void blob_scan(D *d) {
+    blob_range(d);
+    if (!d->foreign || d->bhi == 0) return;
+    for (int fi = 0; fi < d->m->nfuncs && !d->blob; fi++) {
+        const IrFunc *f = &d->m->funcs[fi];
+        if (!strcmp(f->name, "start") || !strcmp(f->name, "_start")) continue;
+        for (int b = 0; b < f->nblocks && !d->blob; b++)
+            for (int k = 0; k < f->blocks[b].ninsns; k++) {
+                const IrInsn *in = &f->blocks[b].insns[k];
+                if (in->op == IR_CALL || in->op == IR_JMP || in->op == IR_BR) continue;
+                if (op_points_data(d, &in->a) || op_points_data(d, &in->b) || op_points_data(d, &in->dst) ||
+                    (in->op == IR_ADDR && in->a.kind == IR_O_MEM && in->a.base == IR_NOREG && in->a.index == IR_NOREG &&
+                     (uint64_t)in->a.disp >= d->blo && (uint64_t)in->a.disp < d->bhi)) { d->blob = 1; break; }
+            }
+    }
+}
 static const char *glob_name(D *d, uint64_t a, int width) {
     static char nm[32];
     long long init;
@@ -356,6 +402,12 @@ static const char *glob_name(D *d, uint64_t a, int width) {
 }
 
 static Ex mem_ex_(D *d, const IrOperand *o) {
+    if (d->foreign && o->base == IR_NOREG && o->index == IR_NOREG && in_blob(d, o->disp)) {
+        Ex a = daddr(d, o->disp);
+        Ex r = exf("*(%s)", a.s);
+        ex_free(a);
+        return r;
+    }
     if (d->foreign && o->base == IR_NOREG && o->index == IR_NOREG) {
         const char *g = glob_name(d, (uint64_t)o->disp, o->width ? o->width : 8);
         if (g) return ex(g);
@@ -413,7 +465,7 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
         if (o->scale != 1) ix = ex_bin("*", ix, exf("%d", o->scale));
         b = ex_bin("+", b, ix);
     }
-    if (o->disp) b = ex_bin("+", b, exf("%lld", (long long)o->disp));
+    if (o->disp) b = ex_bin("+", b, daddr(d, o->disp));
     /* Heap/pointer cell: *(B + X*8) -> B[X], *(B + 8k) -> B[k] (REX scales by 8). */
     char *l, *op, *r;
     if (split_top(b.s, &l, &op, &r)) {
@@ -445,6 +497,7 @@ static Ex op_ex(D *d, const IrOperand *o) {
     case IR_O_IMM:
         if (o->imm == (int64_t)0x8000000000000000ULL)
             return ex("(0 - 9223372036854775807 - 1)");
+        if (o->width >= 4 && in_blob(d, o->imm)) return daddr(d, o->imm);
         return exf("%lld", (long long)o->imm);
     case IR_O_MEM: return d->foreign ? ex_mask(mem_ex(d, o), o->width) : mem_ex(d, o);
     case IR_O_ADDR: {
@@ -676,6 +729,45 @@ static void decl_agg(D *d, int bi, int depth) {
     else emit(d, depth, "let %s[%d]; // hint: array, length from the bounds check", b->name, b->alen);
 }
 
+/* Store src to a memory operand (narrow foreign stores keep the upper bytes). */
+static void store_ex(D *d, const IrInsn *in, Ex src, int src_imm, int depth) {
+    Ex dst = in->dst.kind == IR_O_MEM ? mem_ex(d, &in->dst) : op_ex(d, &in->dst);
+    char bb[1024];
+    if (d->foreign && in->dst.kind == IR_O_MEM && in->dst.width && in->dst.width < 8 && dst.s[0] == '*') {
+        /* REX stores 8 bytes: keep the bytes above the C store width. */
+        unsigned long long m = in->dst.width == 4 ? 4294967295ULL : in->dst.width == 2 ? 65535ULL : 255ULL;
+        emit(d, depth, "%s = (%s & %lld) | %s;", dst.s, dst.s, -(long long)m - 1, ex_mask(ex(src.s), in->dst.width).s);
+        ex_free(dst); ex_free(src);
+        return;
+    }
+    int si = -1;
+    if (in->dst.kind == IR_O_MEM && in->dst.base == 5 && in->dst.index == IR_NOREG)
+        for (int i = 0; i < d->cur->nslots; i++)
+            if (d->cur->slots[i].off == (int)in->dst.disp && d->cur->slots[i].arg < 0) si = i;
+    int agg = si >= 0 ? agg_base(d->cur, si) : -1;
+    if (agg >= 0 && !d->written[si] && !strcmp(src.s, "0") && src_imm) {
+        /* zero-init of an aggregate cell: part of its declaration */
+        d->written[si] = 1;
+        if (!d->declared[agg]) { d->declared[agg] = 1; decl_agg(d, agg, depth); }
+    } else if (agg >= 0) {
+        d->written[si] = 1;
+        if (!d->declared[agg]) { d->declared[agg] = 1; decl_agg(d, agg, depth); }
+        emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
+    } else if (si >= 0 && !d->declared[si] && d->flat && depth == 1) {
+        d->declared[si] = 1;
+        Slot *sl = &d->cur->slots[si];
+        if (!sl->ptr_sid && !strncmp(src.s, "&", 1)) {
+            Slot *tg = NULL;
+            for (int i = 0; i < d->cur->nslots; i++) if (!strcmp(d->cur->slots[i].name, src.s + 1)) tg = &d->cur->slots[i];
+            if (tg && tg->sid) sl->ptr_sid = tg->sid;
+        }
+        emit(d, depth, "let %s = %s;%s", dst.s, bare(src.s, bb, sizeof bb),
+             sl->ptr_sid ? " // hint: pointer to struct" : sl->hint == 2 ? " // hint: pointer" : "");
+    } else if (strcmp(dst.s, src.s))
+        emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
+    ex_free(dst); ex_free(src);
+}
+
 static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     d->depth = depth;
     if (is_prolog(in) || is_epilog(in)) return;
@@ -695,44 +787,9 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     case IR_LOAD:
         if (in->dst.kind == IR_O_REG) setr(d, in->dst.reg, op_ex(d, &in->a));
         break;
-    case IR_STORE: {
-        Ex dst = in->dst.kind == IR_O_MEM ? mem_ex(d, &in->dst) : op_ex(d, &in->dst), src = op_ex(d, &in->a);
-        char bb[1024];
-        if (d->foreign && in->dst.kind == IR_O_MEM && in->dst.width && in->dst.width < 8 && dst.s[0] == '*') {
-            /* REX stores 8 bytes: keep the bytes above the C store width. */
-            unsigned long long m = in->dst.width == 4 ? 4294967295ULL : in->dst.width == 2 ? 65535ULL : 255ULL;
-            emit(d, depth, "%s = (%s & %lld) | %s;", dst.s, dst.s, -(long long)m - 1, ex_mask(ex(src.s), in->dst.width).s);
-            ex_free(dst); ex_free(src);
-            break;
-        }
-        int si = -1;
-        if (in->dst.kind == IR_O_MEM && in->dst.base == 5 && in->dst.index == IR_NOREG)
-            for (int i = 0; i < d->cur->nslots; i++)
-                if (d->cur->slots[i].off == (int)in->dst.disp && d->cur->slots[i].arg < 0) si = i;
-        int agg = si >= 0 ? agg_base(d->cur, si) : -1;
-        if (agg >= 0 && !d->written[si] && !strcmp(src.s, "0") && in->a.kind == IR_O_IMM) {
-            /* zero-init of an aggregate cell: part of its declaration */
-            d->written[si] = 1;
-            if (!d->declared[agg]) { d->declared[agg] = 1; decl_agg(d, agg, depth); }
-        } else if (agg >= 0) {
-            d->written[si] = 1;
-            if (!d->declared[agg]) { d->declared[agg] = 1; decl_agg(d, agg, depth); }
-            emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
-        } else if (si >= 0 && !d->declared[si] && d->flat && depth == 1) {
-            d->declared[si] = 1;
-            Slot *sl = &d->cur->slots[si];
-            if (!sl->ptr_sid && !strncmp(src.s, "&", 1)) {
-                Slot *tg = NULL;
-                for (int i = 0; i < d->cur->nslots; i++) if (!strcmp(d->cur->slots[i].name, src.s + 1)) tg = &d->cur->slots[i];
-                if (tg && tg->sid) sl->ptr_sid = tg->sid;
-            }
-            emit(d, depth, "let %s = %s;%s", dst.s, bare(src.s, bb, sizeof bb),
-                 sl->ptr_sid ? " // hint: pointer to struct" : sl->hint == 2 ? " // hint: pointer" : "");
-        } else if (strcmp(dst.s, src.s))
-            emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
-        ex_free(dst); ex_free(src);
+    case IR_STORE:
+        store_ex(d, in, op_ex(d, &in->a), in->a.kind == IR_O_IMM, depth);
         break;
-    }
     case IR_ADDR:
         if (in->dst.kind == IR_O_REG && d->foreign && in->a.kind == IR_O_MEM && in->a.base != 5 && in->a.base != 4 &&
             !(in->a.base == IR_NOREG && in->a.index == IR_NOREG)) {
@@ -742,13 +799,13 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
                 if (in->a.scale > 1) ix = ex_bin("*", ix, exf("%d", in->a.scale));
                 b = in->a.base != IR_NOREG ? ex_bin("+", b, ix) : (ex_free(b), ix);
             }
-            if (in->a.disp) b = ex_bin("+", b, exf("%lld", (long long)in->a.disp));
+            if (in->a.disp) b = ex_bin("+", b, daddr(d, in->a.disp));
             setr(d, in->dst.reg, b);
             break;
         }
         if (in->dst.kind == IR_O_REG) {
             if (in->a.kind == IR_O_MEM && in->a.base == IR_NOREG && in->a.index == IR_NOREG)
-                setr(d, in->dst.reg, exf("%lld", (long long)in->a.disp));  /* absolute address as number */
+                setr(d, in->dst.reg, daddr(d, in->a.disp));  /* absolute address (gmem offset for data) */
             else if (in->a.kind == IR_O_MEM && in->a.base == 5 && in->a.index == IR_NOREG &&
                      slot_at(d->cur, (int)in->a.disp) && slot_at(d->cur, (int)in->a.disp)->alias[0]) {
                 setr(d, in->dst.reg, exf("&%s", slot_at(d->cur, (int)in->a.disp)->name));
@@ -786,11 +843,18 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
                 setr(d, in->dst.reg, ex_bin("&", ex_bin(">>", op_ex(d, &in->a), exf("%d", k)), exf("%llu", (1ULL << (64 - k)) - 1)));
             } else
                 setr(d, in->dst.reg, ex_bin(bop(in->op), op_ex(d, &in->a), op_ex(d, &in->b)));
+        } else if (in->dst.kind == IR_O_MEM && d->foreign && in->op != IR_DIVU && in->op != IR_REMU) {
+            /* read-modify-write on memory (add [rbp-8], 1) */
+            Ex a = op_ex(d, &in->a), b = op_ex(d, &in->b);
+            if (in->op == IR_SAR && in->dst.width < 8) a = ex_sext(a, in->dst.width);
+            store_ex(d, in, ex_bin(bop(in->op), a, b), 0, depth);
         }
         break;
     case IR_NEG: case IR_NOT:
         if (in->dst.kind == IR_O_REG)
             setr(d, in->dst.reg, ex_un(in->op == IR_NEG ? "-" : "~", op_ex(d, &in->a)));
+        else if (in->dst.kind == IR_O_MEM && d->foreign)
+            store_ex(d, in, ex_un(in->op == IR_NEG ? "-" : "~", op_ex(d, &in->a)), 0, depth);
         break;
     case IR_CMP: case IR_TEST:
         d->cmp = in;
@@ -1843,6 +1907,7 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     d.fun = calloc((size_t)m->nfuncs, sizeof(Fun));
     d.nfun = m->nfuncs;
     classify(&d);
+    blob_scan(&d);
 
 
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 0) decompile_fun(&d, &d.fun[i]);
@@ -1854,7 +1919,8 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     else
         fprintf(out, "// REX-built ELF64 only; names are invented\n\n");
     /* REX globals take a plain number; negative initial values are set first thing in main. */
-    char negs[2048] = "";
+    static char negs[65536];
+    negs[0] = 0;
     for (int i = 0; i < d.nglob; i++) {
         long long iv = d.glob[i].init;
         fprintf(out, "let g_%llx = %lld;\n%s", (unsigned long long)d.glob[i].addr, iv < 0 ? 0 : iv, i + 1 == d.nglob ? "\n" : "");
@@ -1876,6 +1942,30 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
             "    return q;\n"
             "}\n\n"
             "fn urem(a, b) { return a - udiv(a, b) * b; }\n\n");
+    if (d.blob) {
+        fprintf(out, "let gmem = 0; // data sections 0x%llx..0x%llx\n\n", (unsigned long long)d.blo, (unsigned long long)d.bhi);
+        size_t n = strlen(negs);
+        snprintf(negs + n, sizeof negs - n, "    gmem = alloc(%llu);\n", (unsigned long long)(d.bhi - d.blo + BLOB_SLACK + 8));
+        for (int i = 0; i < e.nsh; i++) {
+            const RexShdr *sh = &e.sh[i];
+            if (!(sh->flags & 2) || (sh->flags & 4) || sh->addr < d.blo || sh->addr >= d.bhi || sh->type == 8 || !sh->size) continue;
+            if (!(sh->flags & 1) && strncmp(sh->name, ".rodata", 7)) continue;
+            for (uint64_t o = 0; o < sh->size; o += 8) {
+                long long v = 0;
+                size_t w = sh->size - o < 8 ? (size_t)(sh->size - o) : 8;
+                if (sh->offset + o + w > e.size) break;
+                memcpy(&v, e.data + sh->offset + o, w);
+                if (!v) continue;
+                char line[96];
+                if ((unsigned long long)v == 1ULL << 63) snprintf(line, sizeof line, "    *(gmem + %llu) = 0 - 9223372036854775807 - 1;\n", (unsigned long long)(sh->addr + o - d.blo));
+                else if (v < 0) snprintf(line, sizeof line, "    *(gmem + %llu) = 0 - %lld;\n", (unsigned long long)(sh->addr + o - d.blo), -v);
+                else snprintf(line, sizeof line, "    *(gmem + %llu) = %lld;\n", (unsigned long long)(sh->addr + o - d.blo), v);
+                n = strlen(negs);
+                if (n + strlen(line) + 1 >= sizeof negs) break;
+                memcpy(negs + n, line, strlen(line) + 1);
+            }
+        }
+    }
     if (body && negs[0]) {
         char *mp = strstr(body, "fn main() {\n");
         if (mp) {

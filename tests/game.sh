@@ -28,6 +28,12 @@ if command -v clang >/dev/null 2>&1; then
     build clang O1 collide
     ./rex match "$T/collide_clang_O1" -o "$T/c.rex" >/dev/null
 fi
+# global array (data sections in gmem) and memory read-modify-write at -O0
+for o in O0 O1; do
+    build gcc $o tilemap
+    ./rex match "$T/tilemap_gcc_$o" -o "$T/t.rex" >/dev/null
+done
+grep -q 'gmem = alloc(' "$T/t.rex"
 # unsigned div/mod: rebuild and recovered source behave the same
 for o in O0 O1; do
     "gcc" "-$o" $G -o "$T/udiv_$o" tests/udiv.c
