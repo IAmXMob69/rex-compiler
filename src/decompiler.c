@@ -188,6 +188,8 @@ typedef struct {
     int bound;          /* array length proven for the block being emitted */
     int nstruct;
     int need_udiv;      /* emit the udiv/urem helpers */
+    int need_gfr;       /* global gfr hands a new frame block to a local */
+    int frame;          /* foreign: current function's stack lives in heap block fr (0 = off, else half size) */
     int blob;           /* foreign: data sections live in one heap block gmem */
     uint64_t blo, bhi;  /* address range of that block */
     int foreign;        /* not REX-built (has section headers): register variables, exact widths */
@@ -411,6 +413,18 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
     if (d->foreign && o->base == IR_NOREG && o->index == IR_NOREG) {
         const char *g = glob_name(d, (uint64_t)o->disp, o->width ? o->width : 8);
         if (g) return ex(g);
+    }
+    if (d->frame && (o->base == 4 || o->base == 5)) {
+        Ex b = getr(d, o->base);
+        if (o->index != IR_NOREG) {
+            Ex ix = getr(d, o->index);
+            if (o->scale != 1) ix = ex_bin("*", ix, exf("%d", o->scale));
+            b = ex_bin("+", b, ix);
+        }
+        if (o->disp) b = ex_bin(o->disp < 0 ? "-" : "+", b, exf("%lld", o->disp < 0 ? -(long long)o->disp : (long long)o->disp));
+        Ex r = exf("*(%s)", b.s);
+        ex_free(b);
+        return r;
     }
     if (d->foreign && o->base == 4 && o->index == IR_NOREG) {
         const char *n = slot_name(d->cur, 1000000 + (int)o->disp);
@@ -791,7 +805,7 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         store_ex(d, in, op_ex(d, &in->a), in->a.kind == IR_O_IMM, depth);
         break;
     case IR_ADDR:
-        if (in->dst.kind == IR_O_REG && d->foreign && in->a.kind == IR_O_MEM && in->a.base != 5 && in->a.base != 4 &&
+        if (in->dst.kind == IR_O_REG && d->foreign && in->a.kind == IR_O_MEM && (d->frame || (in->a.base != 5 && in->a.base != 4)) &&
             !(in->a.base == IR_NOREG && in->a.index == IR_NOREG)) {
             Ex b = in->a.base != IR_NOREG ? getr(d, in->a.base) : ex("0");
             if (in->a.index != IR_NOREG) {
@@ -985,6 +999,7 @@ static Ex br_cond(D *d, const IrInsn *br, const IrBlock *b) {
         if (br->cc == IR_CC_EQ) return ex_un("!", v);  /* branch if zero => if (!v) taken */
         return v;
     }
+    if (!cmp && d->foreign) cmp = d->cmp;  /* flags inherited from the fall-through predecessor (cmp; je; jg) */
     return cond_from(d, cmp, br->cc);
 }
 
@@ -1348,7 +1363,7 @@ static int g_build(D *d, const IrFunc *f, G *g) {
     return 0;
 }
 
-typedef struct { int header, exit; } LCtx;
+typedef struct { int header, exit; const IrBlock *latch; } LCtx;  /* latch: do-while tail run before continue */
 
 typedef struct { Ex reg[16]; int has[16]; int nstk; } Snap;
 static void snap_take(D *d, Snap *s) {
@@ -1391,7 +1406,7 @@ static void materialize(D *d, int depth) {
     int pend[16], np = 0;
     char nm[8];
     for (int r = 0; r < 16; r++) {
-        if (r == 4 || !d->has[r]) continue;
+        if (r == 4 || !d->has[r] || (r == 5 && d->frame)) continue;
         snprintf(nm, sizeof nm, "v%d", r);
         if (!strcmp(d->reg[r].s, nm)) continue;
         pend[np++] = r;
@@ -1456,6 +1471,7 @@ static int ret_only(const IrBlock *b) {
 static void flush_decls(D *d) {
     if (!d->flat) return;
     d->flat = 0;
+    if (d->frame) return;
     for (int i = 0; i < d->cur->nslots; i++)
         if (d->cur->slots[i].arg < 0 && !d->declared[i] && !d->cur->slots[i].hidden) {
             d->declared[i] = 1;
@@ -1650,12 +1666,28 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
                 if (ret_only(&f->blocks[bi])) emit_ret(d, depth);
                 return;
             }
-            if (lc && bi == lc->header) { emit(d, depth, "continue;"); return; }
+            if (lc && bi == lc->header) {
+                if (lc->latch && d->foreign) {
+                    /* continue in do-while jumps to the condition: run the tail block's statements first */
+                    Snap s; snap_take(d, &s);
+                    const IrInsn *cmp0 = d->cmp;
+                    int snap0 = d->cmp_snap;
+                    Ex ca = snap0 ? ex(d->cmpa.s) : ex(""), cb = snap0 ? ex(d->cmpb.s) : ex("");
+                    for (int k = 0; k < lc->latch->ninsns - 1; k++) step(d, &lc->latch->insns[k], depth, NULL);
+                    materialize(d, depth);
+                    snap_restore(d, &s, 0);
+                    if (d->cmp_snap) { ex_free(d->cmpa); ex_free(d->cmpb); }
+                    d->cmp = cmp0; d->cmp_snap = snap0;
+                    if (snap0) { d->cmpa = ca; d->cmpb = cb; } else { ex_free(ca); ex_free(cb); }
+                }
+                emit(d, depth, "continue;");
+                return;
+            }
             if (lc && bi == lc->exit) { emit(d, depth, "break;"); return; }
             if (g->loop_exit[bi] != -2 && !(lc && lc->header == bi)) {
                 int latch;
                 flush_decls(d);
-                LCtx inner = { bi, g->loop_exit[bi] };
+                LCtx inner = { bi, g->loop_exit[bi], NULL };
                 const IrBlock *hb = &f->blocks[bi];
                 const IrInsn *ht = hb->ninsns ? &hb->insns[hb->ninsns - 1] : NULL;
                 unsigned char *in = g->inloop + (size_t)bi * g->n;
@@ -1676,7 +1708,7 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
                 } else if ((latch = find_latch(f, g, bi)) >= 0) {
                     const IrBlock *lb = &f->blocks[latch];
                     const IrInsn *lt = &lb->insns[lb->ninsns - 1];
-                    LCtx dl = { latch, inner.exit };
+                    LCtx dl = { latch, inner.exit, lb };
                     emit(d, depth, "do {");
                     Snap s; snap_take(d, &s);
                     structure(d, f, g, bi, latch, &dl, depth + 1, 1);
@@ -1777,6 +1809,7 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
  * (runs of zero-initialized adjacent locals, never indexed) get aliases.
  * Struct declarations print before the function. */
 static void finish_hints(D *d, const IrFunc *f, Fun *fi) {
+    if (d->frame) return;  /* frame block: no slot locals, arrays or structs */
     for (int i = 0; i < fi->nslots; i++) {
         Slot *b = &fi->slots[i];
         if (b->hint != 1 || b->alen < 2) continue;
@@ -1822,6 +1855,35 @@ static void finish_hints(D *d, const IrFunc *f, Fun *fi) {
     }
 }
 
+/* Foreign function whose stack is indexed, address-taken or copied: its
+ * frame moves to a heap block fr (rsp and rbp both start at fr). Returns
+ * the half size of that block, 0 when plain locals suffice. */
+static int frame_size(const IrFunc *f) {
+    int need = 0;
+    long long far = 0;
+    for (int b = 0; b < f->nblocks; b++)
+        for (int k = 0; k < f->blocks[b].ninsns; k++) {
+            const IrInsn *in = &f->blocks[b].insns[k];
+            const IrOperand *ops[3] = { &in->dst, &in->a, &in->b };
+            if (in->op == IR_SUB && in->dst.kind == IR_O_REG && in->dst.reg == 4 && in->b.kind == IR_O_IMM && in->b.imm > far) far = in->b.imm;
+            for (int j = 0; j < 3; j++) {
+                const IrOperand *o = ops[j];
+                if (o->kind == IR_O_MEM && (o->base == 4 || o->base == 5)) {
+                    long long a = o->disp < 0 ? -o->disp : o->disp;
+                    if (a > far) far = a;
+                    if (o->index != IR_NOREG) need = 1;
+                    if (in->op == IR_ADDR && j == 1) need = 1;
+                }
+            }
+            if (is_prolog(in) || is_epilog(in) || in->op == IR_PUSH || in->op == IR_POP || in->op == IR_CALL || in->op == IR_RET) continue;
+            if (in->dst.kind == IR_O_REG && (in->dst.reg == 4 || in->dst.reg == 5)) continue;
+            if ((in->a.kind == IR_O_REG && (in->a.reg == 4 || in->a.reg == 5)) ||
+                (in->b.kind == IR_O_REG && (in->b.reg == 4 || in->b.reg == 5))) need = 1;
+        }
+    if (!need || far > (1 << 20)) return 0;
+    return (int)((far + 256 + 15) & ~15LL);
+}
+
 static void decompile_fun(D *d, Fun *fi) {
     if (fi->kind == 1 || fi->kind == 3) return;
     const IrFunc *f = NULL;
@@ -1835,12 +1897,16 @@ static void decompile_fun(D *d, Fun *fi) {
     d->cur = fi;
     G g;
     d->vused = 0;
+    d->frame = d->foreign ? frame_size(f) : 0;
     if (g_build(d, f, &g) == 0) {
         /* Pass 1 (discarded) collects hints; pass 2 prints. */
+        int hdr_nx = 0;
+        unsigned hdr_vu = 0;
         for (int pass = 0; pass < 2; pass++) {
             for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
             while (d->nstk) ex_free(d->stk[--d->nstk]);
             for (int a = 0; a < fi->nargs; a++) setr(d, ARG[a], exf("%c", 'a' + a));
+            if (d->frame) { setr(d, 4, exf("(fr + %d)", d->frame)); setr(d, 5, exf("(fr + %d)", d->frame)); }
             d->cmp = NULL;
             memset(d->declared, 0, sizeof d->declared);
             d->flat = 1;
@@ -1858,12 +1924,30 @@ static void decompile_fun(D *d, Fun *fi) {
                 fprintf(d->out, "fn %s(", fi->name);
                 for (int a = 0; a < fi->nargs; a++) fprintf(d->out, "%s%c", a ? ", " : "", 'a' + a);
                 fprintf(d->out, ") {\n");
+                if (d->frame) { d->need_gfr = 1; fprintf(d->out, "    gfr = alloc(%d);\n    let fr = gfr; // stack frame (arrays / addresses), rsp = fr + %d\n", 2 * d->frame, d->frame); }
                 for (int r = 0; r < 16; r++) if (d->vused & (1u << r)) fprintf(d->out, "    let v%d = 0;\n", r);
                 for (int r = 0; r < 16; r++) if (d->vused & (1u << (16 + r))) fprintf(d->out, "    let w%d = 0;\n", r);
                 for (int k = 0; k < d->nx; k++) fprintf(d->out, "    let x%d = 0;\n", k);
+                hdr_nx = d->nx; hdr_vu = d->vused;
             } else {
+                /* x temporaries first seen in this pass get declared too */
+                int nx0 = hdr_nx;
+                unsigned vu0 = hdr_vu;
+                char *buf = NULL; size_t n = 0;
+                FILE *save = d->out, *m = open_memstream(&buf, &n);
                 memset(d->written, 0, sizeof d->written);
+                d->nx = 0;
+                if (m) d->out = m;
                 structure(d, f, &g, 0, -1, NULL, 1, 0);
+                if (m) {
+                    fclose(m);
+                    d->out = save;
+                    for (int k = nx0; k < d->nx; k++) fprintf(d->out, "    let x%d = 0;\n", k);
+                    for (int r = 0; r < 16; r++) if ((d->vused & ~vu0) & (1u << r)) fprintf(d->out, "    let v%d = 0;\n", r);
+                    for (int r = 0; r < 16; r++) if ((d->vused & ~vu0) & (1u << (16 + r))) fprintf(d->out, "    let w%d = 0;\n", r);
+                    fputs(buf, d->out);
+                    free(buf);
+                }
             }
         }
     } else {
@@ -1942,6 +2026,7 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
             "    return q;\n"
             "}\n\n"
             "fn urem(a, b) { return a - udiv(a, b) * b; }\n\n");
+    if (d.need_gfr) fprintf(out, "let gfr = 0;%s\n", d.blob ? "" : "\n");
     if (d.blob) {
         fprintf(out, "let gmem = 0; // data sections 0x%llx..0x%llx\n\n", (unsigned long long)d.blo, (unsigned long long)d.bhi);
         size_t n = strlen(negs);

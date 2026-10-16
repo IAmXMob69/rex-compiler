@@ -34,6 +34,12 @@ for o in O0 O1; do
     ./rex match "$T/tilemap_gcc_$o" -o "$T/t.rex" >/dev/null
 done
 grep -q 'gmem = alloc(' "$T/t.rex"
+# stack array (frame block fr) and cmp; je; jg chains
+for o in O0 O1; do
+    build gcc $o statemachine
+    ./rex match "$T/statemachine_gcc_$o" -o "$T/s.rex" >/dev/null
+done
+grep -q 'let fr = gfr;' "$T/s.rex"
 # unsigned div/mod: rebuild and recovered source behave the same
 for o in O0 O1; do
     "gcc" "-$o" $G -o "$T/udiv_$o" tests/udiv.c
