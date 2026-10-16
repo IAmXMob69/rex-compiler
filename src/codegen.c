@@ -101,6 +101,12 @@ static void mem_rex(Cg *g, int width, int rreg, const IrOperand *mem, int force_
 }
 
 static int byte_needs_rex(int reg) { return reg == 4 || reg == 5 || reg == 6 || reg == 7; }
+/* movzx/movsx from a byte register: spl/bpl/sil/dil need a REX prefix,
+ * otherwise the same encoding means ah/ch/dh/bh. */
+static void rex_byte_src(Cg *g, int w, int dreg, int sreg) {
+    if (byte_needs_rex(sreg)) rex_force(g, w, hi(dreg), 0, hi(sreg));
+    else rex(g, w, hi(dreg), 0, hi(sreg));
+}
 
 /* dst = src where both are registers, or a is immediate. Generic mov. */
 static void mov_ri(Cg *g, int reg, int width, int64_t imm) {
@@ -270,13 +276,13 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
         case IR_NOT: rex(g, width_w(in->dst.width), 0, 0, hi(in->dst.reg)); eb(g, 0xf7); modrm_rr(g, 2, in->dst.reg); break;
         case IR_ZEXT:
             if (in->a.kind == IR_O_REG && in->a.width == 4) { rex(g, 0, hi(in->dst.reg), 0, hi(in->a.reg)); eb(g, 0x89); modrm_rr(g, in->a.reg, in->dst.reg); }
-            else if (in->a.kind == IR_O_REG && in->a.width == 1) { rex(g, width_w(in->dst.width), hi(in->dst.reg), 0, hi(in->a.reg)); eb(g, 0x0f); eb(g, 0xb6); modrm_rr(g, in->dst.reg, in->a.reg); }
+            else if (in->a.kind == IR_O_REG && in->a.width == 1) { rex_byte_src(g, width_w(in->dst.width), in->dst.reg, in->a.reg); eb(g, 0x0f); eb(g, 0xb6); modrm_rr(g, in->dst.reg, in->a.reg); }
             else if (in->a.kind == IR_O_REG && in->a.width == 2) { rex(g, width_w(in->dst.width), hi(in->dst.reg), 0, hi(in->a.reg)); eb(g, 0x0f); eb(g, 0xb7); modrm_rr(g, in->dst.reg, in->a.reg); }
             else if (in->a.kind == IR_O_MEM) { int w=in->a.width; mem_rex(g,8,in->dst.reg,&in->a,0); eb(g,0x0f); eb(g, w==1?0xb6:0xb7); modrm_mem(g,in->dst.reg,&in->a); }
             else cgfail(g, "zext form");
             break;
         case IR_SEXT:
-            if (in->a.kind == IR_O_REG) { int w=in->a.width; rex(g, width_w(in->dst.width), hi(in->dst.reg), 0, hi(in->a.reg)); eb(g,0x0f); eb(g, w==1?0xbe:0xbf); modrm_rr(g, in->dst.reg, in->a.reg); }
+            if (in->a.kind == IR_O_REG) { int w=in->a.width; if (w == 1) rex_byte_src(g, width_w(in->dst.width), in->dst.reg, in->a.reg); else rex(g, width_w(in->dst.width), hi(in->dst.reg), 0, hi(in->a.reg)); eb(g,0x0f); eb(g, w==1?0xbe:0xbf); modrm_rr(g, in->dst.reg, in->a.reg); }
             else if (in->a.kind == IR_O_MEM) { int w=in->a.width; mem_rex(g,8,in->dst.reg,&in->a,0); eb(g,0x0f); eb(g, w==1?0xbe:0xbf); modrm_mem(g,in->dst.reg,&in->a); }
             else cgfail(g, "sext form");
             break;
