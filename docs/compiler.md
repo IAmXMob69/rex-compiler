@@ -97,12 +97,12 @@ Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex
 | E110 | loader | PE packed / no executable section |
 | E200 | decode | unsupported or invalid opcode at address |
 | E300 | lift | cannot model instruction exactly |
-| E302 | lift | idiv / div shape |
+| E302 | lift | idiv / div shape (`div` needs `rdx` zeroed in the same block; 8/16-bit `div` refused) |
 | E400 | CFG | recovery failed |
 | E401 | CFG | jump table unclear (no bounds check, not read-only, or non-code entry); known non-PIE tables become a compare chain |
 | E402 | CFG / decompile | irreducible control flow in main (hard failure); in other functions, nesting too deep to structure prints an `// E402` comment at that point |
 | E403 | CFG | address outside executable code |
-| E500 | recompile | encode / layout failure |
+| E500 | recompile | encode / layout failure (every code generator refusal) |
 | E501 | recompile | `--verify` / `--ir` mismatch |
 | E502 | recompile | PE rebuild failed / not clean |
 | E600 | decompile | recovery failure (also printed as a comment when a function's CFG cannot be built) |
@@ -141,14 +141,16 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 - ALU ops are three-address (`dst = dst op src`). `inc`/`dec` become `ADD`/`SUB` 1.
 - `cqo` becomes `MOV rdx, rax; SAR rdx, 63`. `cltd` (32-bit) sets `edx` to the sign bits of `eax` then zero-extends.
 - `idiv`: 64-bit form is `REMS` then `DIVS` when rdx came from `cqo`/`cltd` (rax untouched) or `xor edx, edx` in the same block. 32-bit form sign-extends both sides, divides at 64 bits, and zero-extends eax/edx (only `INT_MIN/-1` differs from hardware).
+- `div`: accepted when `xor edx, edx` or `mov edx, 0` zeroed rdx earlier in the block. 64-bit form is `MOV rdx, 0; REMU; DIVU` (a memory divisor is loaded into r11 first); 32-bit form zero-extends both sides into rax/r11 and divides at 64 bits (exact).
+- `add`/`sub` without their own compare always own the flags: a later `cmovs`/`js` tests the result, never an older `cmp`.
 - When a branch reads flags from an ALU result instead of cmp/test, `need_flags` inserts the matching `TEST`.
 - `jcc` must end its block and becomes `BR taken, fallthrough`. `call` keeps its return address in `b`. An exit syscall is followed by `TRAP`.
 - `nop` / `endbr64` / `endbr32` emit nothing. `leave` becomes `mov rsp, rbp; pop rbp`.
-- Refused with an error: `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cwtd`, other `idiv` forms, 16-bit push/pop, unmapped conditions, odd branch shapes, jumps outside the function, any unlisted instruction.
+- Refused with an error: `ah`/`bh`/`ch`/`dh`, `div` without a zeroed rdx and 8/16-bit `div`, `cwtd`, other `idiv` forms, 16-bit push/pop, unmapped conditions, odd branch shapes, jumps outside the function, any unlisted instruction.
 
 ## Recompiler (`src/codegen.c`, `src/recompiler.c`)
 
-`cg_emit_module` encodes each IR op back to x86-64 bytes (REX prefix, ModRM, SIB by hand) and lays out functions. Block jumps are local fixups; calls to an `ADDR` are rel32 relocations by original address; register calls become `call *reg`. `TRAP` emits nothing. It refuses pc-relative `ADDR`, 8/16-bit shifts, non-register divisors, and other forms it cannot encode exactly (`cgfail`).
+`cg_emit_module` encodes each IR op back to x86-64 bytes (REX prefix, ModRM, SIB by hand) and lays out functions. Block jumps are local fixups; calls to an `ADDR` are rel32 relocations by original address; register calls become `call *reg`. `TRAP` emits nothing. Memory operands are encoded for `add`/`sub`/`and`/`or`/`xor` (either side), `cmp`/`test` (either side), `imul r, [m]` and `imul r, [m], imm`, and `movsxd`. `movzx`/`movsx` from `sil`/`dil`/`spl`/`bpl` force a REX prefix. It refuses pc-relative `ADDR`, 8/16-bit shifts, non-register divisors, and other forms it cannot encode exactly (`cgfail`, always `E500`).
 
 `rex_recompile` copies every original `PT_LOAD` unchanged at its old address and flags, adds one R+X segment at the next page above them plus 0x100000, points the entry at the new `start`, and rebinds calls to lifted functions to the new code. Calls to anything else go to the original address. The image must stay below 2 GiB (rel32). `--poison` overwrites every decoded original instruction with `int3`. `--debug` prints counts and the old → new address map.
 
@@ -164,9 +166,17 @@ IR register n is x86 register n (rax=0 … r15=15). `lift_insn` rules:
 
 `step` evaluates IR symbolically into expressions; `walk2` rebuilds `if`/`else` (via `find_join`), `while` (via `is_loop_header`), and `switch` from REX push/compare chains or lifted jump-table compare chains. Prologue and epilogue are dropped. Calls to unrecognized helpers such as `rex_fail` are dropped. A call through a register prints the pointer expression called with two arguments. Output starts with two `//` header lines. `--verbose` prints each function's kind, argument count and builtin.
 
+gcc/clang (non-REX) binaries:
+
+- Data: if any function indexes or takes the address of `.data`/`.bss`/`.rodata`, those sections are copied into one heap block `gmem` at the top of `main` (nonzero words only). Data addresses print as `(gmem + off)`, plus 256 bytes for end pointers. Otherwise globals stay scalar `g_ADDR`.
+- Stack: a function that indexes, takes the address of, or copies `rsp`/`rbp` gets its frame in a fresh heap block (`gfr = alloc(N); let fr = gfr;`, rsp and rbp start at `fr + N/2`). Other functions keep slot locals `tN`. The block is not freed.
+- Unsigned divide prints `/` and `%` when both sides fit in 63 bits, else `udiv(a, b)` / `urem(a, b)` helpers emitted once at the top.
+- Register expressions that read memory are pinned in `xN` before a store or call that could change that memory.
+- Negative initial values of scalar globals are assigned at the top of `main` (REX globals take a plain number).
+
 ## x86-64 decoder / lift roadmap
 
-Present today (decoder + lift unless noted): the REX emission set, plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32`, `leave`, `hlt`/`ud2`, `cmovcc` (IR_CMOV), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate, `setcc`, `cqo`/`cltd`, 32-bit `idiv`, shifts by imm and by `%cl`, and non-PIE jump tables in the CFG.
+Present today (decoder + lift unless noted): the REX emission set, unsigned `div` (32/64-bit), plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32`, `leave`, `hlt`/`ud2`, `cmovcc` (IR_CMOV), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate, `setcc`, `cqo`/`cltd`, 32-bit `idiv`, shifts by imm and by `%cl`, and non-PIE jump tables in the CFG.
 
 Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` output:
 
@@ -181,7 +191,7 @@ Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` outpu
 ## Roadmap (tool)
 
 1. PE imports/relocs (today: static PE32+ sections only, imports refused); richer PE → the same IR subset.
-2. Done: dominator/postdominator structuring (while, do-while, while(1) + break/continue, if/else, REX switch), array/struct/pointer hints, `make bench-decompile`, golden tests. Measured on the benchmark corpus: REX examples `match` 29/43 and `match --ir` 26/43 (was 20 and 13); gcc/clang samples 0/36. Phase 6 done: non-PIE jump tables (compare chain in the IR, `switch` in the decompiler, `E401` when the table is unclear), `cltd`/32-bit `idiv`, register variables `vN`, globals `g_ADDR` and exact 8/16/32-bit widths for non-REX binaries, and `bench/game` samples (gcc+clang, -O0/-O1/-O2, static non-PIE). Measured: game samples `match` 6/36 (was 0/36), `match --ir` 0/36. Next: `&&`/`||` chains, rotated loops, stack and global arrays, struct-array fields, SSE/vector code, unsigned `div`, `.eh_frame` seeds. Keep the REX path as the high-quality case.
+2. Done: dominator/postdominator structuring (while, do-while, while(1) + break/continue, if/else, REX switch), array/struct/pointer hints, `make bench-decompile`, golden tests. Measured on the benchmark corpus: REX examples `match` 29/43 and `match --ir` 26/43 (was 20 and 13); gcc/clang samples 0/36. Phase 6 done: non-PIE jump tables (compare chain in the IR, `switch` in the decompiler, `E401` when the table is unclear), `cltd`/32-bit `idiv`, register variables `vN`, globals `g_ADDR` and exact 8/16/32-bit widths for non-REX binaries, and `bench/game` samples (gcc+clang, -O0/-O1/-O2, static non-PIE). Measured: game samples `match` 6/36 (was 0/36), `match --ir` 0/36. Phase 7 done: unsigned `div`/mod (lift, rebuild, decompile with `udiv`/`urem` helpers when a side may exceed 2^63), global arrays (`.data`/`.bss`/`.rodata` copied into heap block `gmem` at the top of `main`), stack arrays (frame block `fr` for functions that index, address or copy the stack), memory read-modify-write, lazy memory reads pinned before stores and calls, flags inherited across `cmp; je; jg`, `continue` in do-while, and the rebuild fixes (`sil`/`dil` byte sources, `movsxd`, memory operands). Measured: game samples `match` 26/36 (was 6/36), all remaining misses are SSE; whole corpus `match` 55/115 (was 35/115). Next: `&&`/`||` chains and rotated loops as source shapes, struct-array fields, named arrays, SSE/vector code, dynamic glibc samples, `.eh_frame` seeds. Keep the REX path as the high-quality case.
 3. PIE, shared objects, relocations.
 4. Mach-O, ARM64, RISC-V — each behind the same loader registry.
 
@@ -212,10 +222,12 @@ Lexer and parser state is local. The rest of `src/rex.c` is file-scope: `g_out`,
 - One RWX segment. No W^X.
 - `exec` is `fork` plus `/bin/sh -c`. That is a security footgun; do not feed it outside input.
 - Recompile and decompile are designed for REX's own output. Other binaries usually stop at the lift or the encoder with an error.
-- Decompile recovers loops, if/else, and switch (REX chains and non-PIE jump tables). Arrays, pointers and globals are partial. Nested structs and most pointer arithmetic stay opaque. Names are invented.
+- Decompile recovers loops, if/else, and switch (REX chains and non-PIE jump tables). Arrays, pointers and globals are partial for REX binaries; gcc/clang arrays round-trip as byte offsets in `gmem`/`fr`. Nested structs stay opaque. Names are invented.
 - No optimization anywhere. No second architecture: instruction names, syscall numbers and ELF headers are inline.
 
 ## Known issues
 
+- Decompiled gcc/clang functions with a frame block (`fr`) allocate on every call and never free; deep recursion can run out of memory.
+- gcc IPA register allocation (a callee known not to clobber a caller-saved register) is not modeled; such callers may not round-trip.
 - Nodes store a line, not a column. The caret uses a token column only when the caller passes one (`col_of`).
 - Self-host is not done. `examples/rexcomp.rex` reaches a fixed point for its own subset only. It is not a self-host of `src/rex.c`.

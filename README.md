@@ -234,11 +234,11 @@ Language: No nested structs. A struct stays in the function that created it, unl
 
 Input binaries: ELF64, little-endian, x86-64, Linux/SysV ABI, `ET_EXEC` only; plus simple static PE32+ x86-64 for `look`/`show`/`ir`. The loader refuses 32-bit ELF, big-endian, relocatable objects, shared objects and PIE, core dumps, and extended header/section counts. Other PE shapes (i386/ARM, PE32, imports, relocs, TLS, .NET, packed) get plain-English `E1xx` refusals. Simple static PE32+ can `rebuild` to a new PE (new `.rextext` section); packed/import-heavy shapes stay refused. Other formats exit with code 2 and `unrecognized binary format: <hex>`. Function discovery still prefers REX-shaped prologues (`push rbp` / `endbr64`) when seeding from rip-relative lea/mov.
 
-Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo/cltd, 32-bit idiv, syscall, movzx/movsx), plus non-PIE jump tables in the CFG. Direct calls start functions; a rip-relative `lea`/`mov` also does, but only when its target starts with `push rbp` (0x55) or `endbr64`. The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, unsigned `div`, `cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Unclear jump tables are `E401`; other indirect jumps end the block.
+Decoder and lift: the instructions REX itself emits (mov, push/pop, lea, arithmetic, logic, shifts, cmp/test, jumps, calls, returns, setcc, cqo/cltd, 32-bit idiv, unsigned div, syscall, movzx/movsx), plus non-PIE jump tables in the CFG. Direct calls start functions; a rip-relative `lea`/`mov` also does, but only when its target starts with `push rbp` (0x55) or `endbr64`. The lift stops with a clear error on unsupported opcodes, `ah`/`bh`/`ch`/`dh`, `div` without a zeroed `rdx`, `cwtd`, unusual `idiv` forms, unsupported conditions and branch shapes. Unclear jump tables are `E401`; other indirect jumps end the block.
 
 Recompile: no pc-relative `lea`, no 8/16-bit shifts. Function-pointer calls keep working because the original code stays mapped.
 
-Decompile: names are invented. A call through a register prints the pointer expression with two arguments. Loops, if/else, and switch (REX chains and non-PIE jump tables) are recovered; arrays, pointers and globals are partial; nested structs and most pointer arithmetic stay opaque. Arbitrary binaries may be refused or give a stub that does not round-trip.
+Decompile: names are invented. A call through a register prints the pointer expression with two arguments. Loops, if/else, and switch (REX chains and non-PIE jump tables) are recovered. In gcc/clang code, indexed or address-taken data lives in one heap block (`gmem`) and an indexed or address-taken stack frame in another (`fr`), so arrays round-trip as byte offsets; unsigned 64-bit divides call emitted `udiv`/`urem` helpers. Nested structs and named array types are not recovered. Arbitrary binaries may be refused or give a stub that does not round-trip.
 
 ## REX vs Ghidra / Binary Ninja
 
@@ -262,9 +262,9 @@ Done: ELF64 loader behind a registry, PE32+ x86-64 load + simple rebuild (`.rext
 
 Next (no schedule):
 
-1. Real PE section/import parsing (then PE → IR for the same x86-64 subset).
-2. Fuller x86-64: SSE moves, more imul forms, string ops, `bt*`, `xchg`/`cmpxchg`, PIC/PLT calls, jump tables.
-3. Optimized gcc/clang code. Done: non-PIE jump tables (rebuilt as compare chains, decompiled as `switch`; unclear tables are `E401`), `cltd` and 32-bit `idiv`, register variables and exact C widths for non-REX binaries, game-like benchmark samples (`bench/game`). Measured: game samples `match` 6/36 (was 0/36), `match --ir` 0/36; the small gcc/clang samples still 0/36. Next: `&&`/`||` chains, loop rotation, stack arrays and global arrays, struct-array fields, SSE/vector code (now `E200`), unsigned `div` (now `E302`), `.eh_frame` seeds.
+1. PE imports and relocations (sections already parse; imports, relocs, TLS refused).
+2. Fuller x86-64: SSE/vector code (now `E200`), string ops, `bt*`, `cmpxchg`, PIC/PLT calls, 8/16-bit `div`.
+3. Optimized gcc/clang code. Done: non-PIE jump tables, `cltd` and 32-bit `idiv`, unsigned `div`/mod, register variables and exact C widths, global and stack arrays (`gmem`/`fr` blocks), memory operands on `add`/`cmp`/`imul`. Measured on `bench/game` (gcc+clang, -O0/-O1/-O2): `match` 26/36 (was 6/36); every remaining miss is SSE (`E200`). Next: `&&`/`||` chains and rotated loops as source shapes, struct-array fields, named arrays, dynamic glibc samples (0/36), `.eh_frame` seeds.
 4. PIE / shared objects / relocations.
 5. Later: Mach-O, ARM64, RISC-V.
 
