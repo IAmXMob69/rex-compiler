@@ -116,7 +116,7 @@ int ir_link(IrFunc *f, char *err, size_t errlen) {
 
 static const char *opnames[IR_OP_COUNT] = {
     "nop", "mov", "load", "store", "addr",
-    "add", "sub", "mul", "divs", "rems",
+    "add", "sub", "mul", "divs", "rems", "divu", "remu",
     "and", "or", "xor", "shl", "shr", "sar",
     "neg", "not", "zext", "sext",
     "cmp", "test", "setcc", "cmov",

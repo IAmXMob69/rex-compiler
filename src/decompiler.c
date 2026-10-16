@@ -187,6 +187,7 @@ typedef struct {
     int flat;
     int bound;          /* array length proven for the block being emitted */
     int nstruct;
+    int need_udiv;      /* emit the udiv/urem helpers */
     int foreign;        /* not REX-built (has section headers): register variables, exact widths */
     const RexElf *elf;
     struct { uint64_t addr; int width; long long init; } glob[256];
@@ -206,6 +207,15 @@ static Fun *fby(D *d, uint64_t a) {
 }
 
 static void emit(D *d, int depth, const char *fmt, ...);
+/* True when s uses the variable name vn as a whole token. */
+static int mentions_v(const char *s, const char *vn) {
+    size_t n = strlen(vn);
+    for (const char *q = strstr(s, vn); q; q = strstr(q + 1, vn)) {
+        char nx = q[n];
+        if ((q == s || !(q[-1] == '_' || (q[-1] >= 'a' && q[-1] <= 'z') || (q[-1] >= '0' && q[-1] <= '9'))) && !(nx >= '0' && nx <= '9')) return 1;
+    }
+    return 0;
+}
 static void setr(D *d, int r, Ex v) {
     if (r < 0 || r > 15) { ex_free(v); return; }
     if (d->has[r]) ex_free(d->reg[r]);
@@ -253,6 +263,15 @@ static Ex ex_mask(Ex e, int width) {
     Ex r = exf("(%s & %llu)", e.s, m);
     ex_free(e);
     return r;
+}
+/* True when e is a non-negative literal or already masked to <= 32 bits. */
+static int ex_nonneg(Ex e) {
+    long long v;
+    if (is_num(e.s, &v)) return v >= 0;
+    Ex t = ex_mask(ex(e.s), 4);
+    int same = !strcmp(t.s, e.s);
+    ex_free(t);
+    return same;
 }
 static Ex ex_sext(Ex e, int width) {
     if (width >= 8) return e;
@@ -439,7 +458,7 @@ static Ex op_ex(D *d, const IrOperand *o) {
 static const char *bop(IrOp op) {
     switch (op) {
     case IR_ADD: return "+"; case IR_SUB: return "-"; case IR_MUL: return "*";
-    case IR_DIVS: return "/"; case IR_REMS: return "%";
+    case IR_DIVS: case IR_DIVU: return "/"; case IR_REMS: case IR_REMU: return "%";
     case IR_AND: return "&"; case IR_OR: return "|"; case IR_XOR: return "^";
     case IR_SHL: return "<<"; case IR_SHR: case IR_SAR: return ">>";
     default: return "?";
@@ -748,10 +767,19 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             }
         }
         break;
-    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIVS: case IR_REMS:
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIVS: case IR_REMS: case IR_DIVU: case IR_REMU:
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR: case IR_SAR:
         if (in->dst.kind == IR_O_REG) {
-            if (d->foreign && in->op == IR_SAR && in->dst.width < 8)
+            if (in->op == IR_DIVU || in->op == IR_REMU) {
+                /* REX "/" is signed: plain when both sides are known below 2^63. */
+                Ex a = op_ex(d, &in->a), b = op_ex(d, &in->b);
+                if (ex_nonneg(a) && ex_nonneg(b)) setr(d, in->dst.reg, ex_bin(bop(in->op), a, b));
+                else {
+                    d->need_udiv = 1;
+                    setr(d, in->dst.reg, exf("%s(%s, %s)", in->op == IR_DIVU ? "udiv" : "urem", a.s, b.s));
+                    ex_free(a); ex_free(b);
+                }
+            } else if (d->foreign && in->op == IR_SAR && in->dst.width < 8)
                 setr(d, in->dst.reg, ex_bin(">>", ex_sext(op_ex(d, &in->a), in->dst.width), op_ex(d, &in->b)));
             else if (d->foreign && in->op == IR_SHR && in->dst.width == 8 && in->b.kind == IR_O_IMM && (in->b.imm & 63)) {
                 int k = (int)(in->b.imm & 63);
@@ -856,6 +884,15 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             ex_free(call);
         } else if (d->foreign) {
             d->vused |= 1u;
+            /* Callee-saved registers still holding an expression of v0 keep
+             * the value from before this call. */
+            for (int r = 1; r < 16; r++) {
+                if (r == 4 || !d->has[r] || !mentions_v(d->reg[r].s, "v0")) continue;
+                char bb2[1024];
+                int k = d->nx++;
+                emit(d, depth, "x%d = %s;", k, bare(d->reg[r].s, bb2, sizeof bb2));
+                ex_free(d->reg[r]); d->reg[r] = exf("x%d", k);
+            }
             emit(d, depth, "v0 = %s;", call.s);
             ex_free(call);
             static const int clob[] = { 0, 1, 2, 6, 7, 8, 9, 10, 11 };
@@ -1816,8 +1853,39 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
         fprintf(out, "// not REX-built: vN are registers, g_ADDR are globals, C widths are masked; names are invented\n\n");
     else
         fprintf(out, "// REX-built ELF64 only; names are invented\n\n");
-    for (int i = 0; i < d.nglob; i++)
-        fprintf(out, "let g_%llx = %lld;\n%s", (unsigned long long)d.glob[i].addr, d.glob[i].init, i + 1 == d.nglob ? "\n" : "");
+    /* REX globals take a plain number; negative initial values are set first thing in main. */
+    char negs[2048] = "";
+    for (int i = 0; i < d.nglob; i++) {
+        long long iv = d.glob[i].init;
+        fprintf(out, "let g_%llx = %lld;\n%s", (unsigned long long)d.glob[i].addr, iv < 0 ? 0 : iv, i + 1 == d.nglob ? "\n" : "");
+        if (iv < 0 && strlen(negs) + 64 < sizeof negs && (unsigned long long)iv == 1ULL << 63)
+            snprintf(negs + strlen(negs), sizeof negs - strlen(negs), "    g_%llx = 0 - 9223372036854775807 - 1;\n",
+                     (unsigned long long)d.glob[i].addr);
+        else if (iv < 0 && strlen(negs) + 64 < sizeof negs)
+            snprintf(negs + strlen(negs), sizeof negs - strlen(negs), "    g_%llx = 0 - %llu;\n",
+                     (unsigned long long)d.glob[i].addr, 0ULL - (unsigned long long)iv);
+    }
+    if (d.need_udiv)
+        fprintf(out, "// unsigned 64-bit divide (REX / is signed)\n"
+            "fn udiv(a, b) {\n"
+            "    let m = -9223372036854775807 - 1;\n"
+            "    if (b < 0) { if ((a ^ m) >= (b ^ m)) { return 1; } return 0; }\n"
+            "    let q = (((a >> 1) & 9223372036854775807) / b) << 1;\n"
+            "    let r = a - q * b;\n"
+            "    if ((r ^ m) >= (b ^ m)) { q = q + 1; }\n"
+            "    return q;\n"
+            "}\n\n"
+            "fn urem(a, b) { return a - udiv(a, b) * b; }\n\n");
+    if (body && negs[0]) {
+        char *mp = strstr(body, "fn main() {\n");
+        if (mp) {
+            mp += strlen("fn main() {\n");
+            fwrite(body, 1, (size_t)(mp - body), out);
+            fputs(negs, out);
+            fputs(mp, out);
+            free(body); body = NULL;
+        }
+    }
     if (body) fputs(body, out);
     free(body);
 

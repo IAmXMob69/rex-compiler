@@ -261,9 +261,47 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         l->flags = FL_NONE;
         break;
     }
-    case X86_DIV:
-        lfail(l, "unsigned div is not supported");
+    case X86_DIV: {
+        /* Unsigned divide of rdx:rax. Accept only a zero high half set in this
+         * block: xor edx,edx or mov edx,0 (rdx untouched since). */
+        int ok = 0;
+        const X86Insn *bi = l->cf->insns;
+        for (int k = (int)(in - bi) - 1; k >= l->bfirst; k--) {
+            const X86Insn *q = &bi[k];
+            if (q->op == X86_XOR && q->ops[0].kind == XO_REG && q->ops[1].kind == XO_REG && q->ops[0].reg == 2 && q->ops[1].reg == 2 && q->ops[0].size >= 4) { ok = 1; break; }
+            if (q->op == X86_MOV && q->ops[0].kind == XO_REG && q->ops[0].reg == 2 && q->ops[0].size >= 4 && q->ops[1].kind == XO_IMM && q->ops[1].imm == 0) { ok = 1; break; }
+            int wr = q->nops > 0 && q->ops[0].kind == XO_REG ? q->ops[0].reg : -1;
+            if (wr == 2 || q->op == X86_CALL || q->op == X86_SYSCALL || q->op == X86_IDIV || q->op == X86_DIV || q->op == X86_POP
+                || q->op == X86_CQO || q->op == X86_XCHG) break;
+        }
+        if (!ok) { lfail(l, "div dividend high half (rdx) not zeroed by xor edx or mov edx,0"); break; }
+        if (d.kind == IR_O_REG && (d.reg == 0 || d.reg == 2 || d.reg == 11)) { lfail(l, "div by rax/rdx/r11 not supported"); break; }
+        if (d.width == 4) {
+            /* 32-bit div: zero-extend both sides and divide at 64 bits (exact). */
+            wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8)); wrote(l, ir_reg(11, 8));
+            if (d.kind == IR_O_MEM) { i = emit(l, IR_LOAD); i->dst = ir_reg(11, 4); i->a = d; }
+            else { i = emit(l, IR_MOV); i->dst = ir_reg(11, 4); i->a = d; }
+            zext32(l, ir_reg(11, 4));
+            zext32(l, ir_reg(0, 4));
+            i = emit(l, IR_MOV); i->dst = ir_reg(2, 8); i->a = ir_imm(0, 8);
+            i = emit(l, IR_REMU); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
+            i = emit(l, IR_DIVU); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
+            l->flags = FL_NONE;
+            break;
+        }
+        if (d.width != 8) { lfail(l, "8/16-bit div is not supported"); break; }
+        wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8));
+        if (d.kind == IR_O_MEM) {
+            wrote(l, ir_reg(11, 8));
+            i = emit(l, IR_LOAD); i->dst = ir_reg(11, 8); i->a = d;
+            d = ir_reg(11, 8);
+        }
+        i = emit(l, IR_MOV); i->dst = ir_reg(2, 8); i->a = ir_imm(0, 8);
+        i = emit(l, IR_REMU); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = d;
+        i = emit(l, IR_DIVU); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 8); i->b = d;
+        l->flags = FL_NONE;
         break;
+    }
     case X86_CQO:
         if (in->ops[0].size == 4) {  /* cltd: edx = sign bits of eax */
             wrote(l, ir_reg(2, 8));

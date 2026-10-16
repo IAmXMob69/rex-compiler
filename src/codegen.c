@@ -262,6 +262,14 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
             } else cgfail(g, "imul operand");
             break;
         }
+        case IR_DIVU: case IR_REMU: {
+            /* lifter zeroed rdx; one div serves the rem/div pair */
+            const IrOperand *b = &in->b;
+            if (b->kind != IR_O_REG) { cgfail(g, "divisor must be a register"); break; }
+            if (in->op == IR_DIVU && !(k > 0 && bl->insns[k - 1].op == IR_REMU)) { cgfail(g, "divu without paired remu"); break; }
+            if (in->op == IR_REMU) { rex(g, 1, 0, 0, hi(b->reg)); eb(g, 0xf7); modrm_rr(g, 6, b->reg); }
+            break;
+        }
         case IR_DIVS: case IR_REMS: {
             /* lifter already emitted cqo via MOV/SAR; just idiv b */
             const IrOperand *b = &in->b;

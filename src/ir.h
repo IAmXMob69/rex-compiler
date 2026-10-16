@@ -36,7 +36,7 @@ typedef enum {
     IR_LOAD,    /* dst = [a] */
     IR_STORE,   /* [dst] = a */
     IR_ADDR,    /* dst = address of mem a (pointer arithmetic) */
-    IR_ADD, IR_SUB, IR_MUL, IR_DIVS, IR_REMS,
+    IR_ADD, IR_SUB, IR_MUL, IR_DIVS, IR_REMS, IR_DIVU, IR_REMU,
     IR_AND, IR_OR, IR_XOR, IR_SHL, IR_SHR, IR_SAR,
     IR_NEG, IR_NOT, IR_ZEXT, IR_SEXT,   /* dst = op a (,b) */
     IR_CMP,     /* flags = a - b */

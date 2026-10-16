@@ -28,6 +28,18 @@ if command -v clang >/dev/null 2>&1; then
     build clang O1 collide
     ./rex match "$T/collide_clang_O1" -o "$T/c.rex" >/dev/null
 fi
+# unsigned div/mod: rebuild and recovered source behave the same
+for o in O0 O1; do
+    "gcc" "-$o" $G -o "$T/udiv_$o" tests/udiv.c
+    ./rex compare "$T/udiv_$o" -o "$T/u.re" >/dev/null
+    ./rex match "$T/udiv_$o" -o "$T/u.rex" >/dev/null
+done
+grep -q 'udiv(' "$T/u.rex"
+# div with an unknown high half (rdx) is refused with E302
+printf '%s\n' '.globl _start' '_start: mov $7,%ecx' ' mov $100,%eax' ' div %ecx' ' mov %eax,%edi' ' mov $60,%eax' ' syscall' > "$T/divrdx.s"
+gcc -static -nostdlib -no-pie -o "$T/divrdx" "$T/divrdx.s"
+! ./rex decompile "$T/divrdx" -o "$T/dr.rex" 2> "$T/dr.err"
+grep -q 'E302' "$T/dr.err"
 # vector code stays an explicit refusal
 build gcc O2 entities
 ! ./rex decompile "$T/entities_gcc_O2" -o "$T/e.rex" 2> "$T/e.err"
