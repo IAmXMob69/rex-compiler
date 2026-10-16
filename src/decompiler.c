@@ -198,6 +198,7 @@ typedef struct {
     int nglob;
     unsigned vused;     /* register variables used in the current function */
     int nx, nxmax;      /* spill temporaries x0.. in the current function */
+    int fixed_x;        /* >= 0: compare spills use x<fixed_x>, x<fixed_x+1> */
     int depth;          /* indentation of the statement being stepped */
     Ex cmpa, cmpb;      /* foreign: cmp/test operands as of the compare */
     int cmp_snap;           /* no control flow emitted yet at function level */
@@ -482,7 +483,7 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
     if (o->disp) b = ex_bin("+", b, daddr(d, o->disp));
     /* Heap/pointer cell: *(B + X*8) -> B[X], *(B + 8k) -> B[k] (REX scales by 8). */
     char *l, *op, *r;
-    if (split_top(b.s, &l, &op, &r)) {
+    if (!d->foreign && split_top(b.s, &l, &op, &r)) {
         Ex out = (Ex){ NULL };
         long long k;
         size_t rn = strlen(r);
@@ -743,9 +744,36 @@ static void decl_agg(D *d, int bi, int depth) {
     else emit(d, depth, "let %s[%d]; // hint: array, length from the bounds check", b->name, b->alen);
 }
 
+/* Foreign code: register expressions read memory lazily. Before a write
+ * that may change what they read, pin them in x temporaries. name: the
+ * variable written, or NULL for any memory. */
+static void pin_reads(D *d, int depth, const char *name) {
+    if (!d->foreign) return;
+    char bb[1024];
+    for (int r = 0; r < 16; r++) {
+        if (!d->has[r] || r == 4 || (r == 5 && d->frame)) continue;
+        const char *e = d->reg[r].s;
+        if (name ? !mentions_v(e, name) : !strstr(e, "*(")) continue;
+        int k = d->nx++;
+        emit(d, depth, "x%d = %s;", k, bare(e, bb, sizeof bb));
+        ex_free(d->reg[r]); d->reg[r] = exf("x%d", k);
+    }
+    if (d->cmp_snap) {
+        Ex *sn[2] = { &d->cmpa, &d->cmpb };
+        for (int j = 0; j < 2; j++) {
+            const char *e = sn[j]->s;
+            if (name ? !mentions_v(e, name) : !strstr(e, "*(")) continue;
+            int k = d->nx++;
+            emit(d, depth, "x%d = %s;", k, bare(e, bb, sizeof bb));
+            ex_free(*sn[j]); *sn[j] = exf("x%d", k);
+        }
+    }
+}
+
 /* Store src to a memory operand (narrow foreign stores keep the upper bytes). */
 static void store_ex(D *d, const IrInsn *in, Ex src, int src_imm, int depth) {
     Ex dst = in->dst.kind == IR_O_MEM ? mem_ex(d, &in->dst) : op_ex(d, &in->dst);
+    if (d->foreign) pin_reads(d, depth, dst.s[0] == '*' ? NULL : dst.s);
     char bb[1024];
     if (d->foreign && in->dst.kind == IR_O_MEM && in->dst.width && in->dst.width < 8 && dst.s[0] == '*') {
         /* REX stores 8 bytes: keep the bytes above the C store width. */
@@ -962,6 +990,7 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             ex_free(call);
         } else if (d->foreign) {
             d->vused |= 1u;
+            pin_reads(d, depth, NULL);  /* the callee may write memory */
             /* Callee-saved registers still holding an expression of v0 keep
              * the value from before this call. */
             for (int r = 1; r < 16; r++) {
@@ -1363,7 +1392,7 @@ static int g_build(D *d, const IrFunc *f, G *g) {
     return 0;
 }
 
-typedef struct { int header, exit; const IrBlock *latch; } LCtx;  /* latch: do-while tail run before continue */
+typedef struct { int header, exit; const IrBlock *latch; int lx; } LCtx;  /* lx: x temps reserved for the latch compare */  /* latch: do-while tail run before continue */
 
 typedef struct { Ex reg[16]; int has[16]; int nstk; } Snap;
 static void snap_take(D *d, Snap *s) {
@@ -1427,7 +1456,7 @@ static void materialize(D *d, int depth) {
             }
             if (!uses) continue;
             char bb2[1024];
-            int k = d->nx++;
+            int k = d->fixed_x >= 0 ? d->fixed_x + s : d->nx++;
             emit(d, depth, "x%d = %s;", k, bare(sn[s]->s, bb2, sizeof bb2));
             ex_free(*sn[s]);
             *sn[s] = exf("x%d", k);
@@ -1654,6 +1683,27 @@ static int try_switch(D *d, const IrFunc *f, G *g, int bi, const LCtx *lc, int d
     return 1;
 }
 
+/* continue; in a do-while jumps to the condition, so the tail block's
+ * statements run first (foreign code). */
+static void emit_continue(D *d, const LCtx *lc, int depth) {
+    if (lc->latch && d->foreign) {
+        /* continue in do-while jumps to the condition: run the tail block's statements first */
+        Snap s; snap_take(d, &s);
+        const IrInsn *cmp0 = d->cmp;
+        int snap0 = d->cmp_snap;
+        Ex ca = snap0 ? ex(d->cmpa.s) : ex(""), cb = snap0 ? ex(d->cmpb.s) : ex("");
+        for (int k = 0; k < lc->latch->ninsns - 1; k++) step(d, &lc->latch->insns[k], depth, NULL);
+        d->fixed_x = lc->lx;
+        materialize(d, depth);
+        d->fixed_x = -1;
+        snap_restore(d, &s, 0);
+        if (d->cmp_snap) { ex_free(d->cmpa); ex_free(d->cmpb); }
+        d->cmp = cmp0; d->cmp_snap = snap0;
+        if (snap0) { d->cmpa = ca; d->cmpb = cb; } else { ex_free(ca); ex_free(cb); }
+    }
+    emit(d, depth, "continue;");
+}
+
 static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx *lc, int depth, int enter) {
     if (depth > 48 || g_budget <= 0) {
         emit(d, depth, "// E402: control flow too tangled to structure here (block %d)", bi);
@@ -1667,27 +1717,14 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
                 return;
             }
             if (lc && bi == lc->header) {
-                if (lc->latch && d->foreign) {
-                    /* continue in do-while jumps to the condition: run the tail block's statements first */
-                    Snap s; snap_take(d, &s);
-                    const IrInsn *cmp0 = d->cmp;
-                    int snap0 = d->cmp_snap;
-                    Ex ca = snap0 ? ex(d->cmpa.s) : ex(""), cb = snap0 ? ex(d->cmpb.s) : ex("");
-                    for (int k = 0; k < lc->latch->ninsns - 1; k++) step(d, &lc->latch->insns[k], depth, NULL);
-                    materialize(d, depth);
-                    snap_restore(d, &s, 0);
-                    if (d->cmp_snap) { ex_free(d->cmpa); ex_free(d->cmpb); }
-                    d->cmp = cmp0; d->cmp_snap = snap0;
-                    if (snap0) { d->cmpa = ca; d->cmpb = cb; } else { ex_free(ca); ex_free(cb); }
-                }
-                emit(d, depth, "continue;");
+                emit_continue(d, lc, depth);
                 return;
             }
             if (lc && bi == lc->exit) { emit(d, depth, "break;"); return; }
             if (g->loop_exit[bi] != -2 && !(lc && lc->header == bi)) {
                 int latch;
                 flush_decls(d);
-                LCtx inner = { bi, g->loop_exit[bi], NULL };
+                LCtx inner = { bi, g->loop_exit[bi], NULL, -1 };
                 const IrBlock *hb = &f->blocks[bi];
                 const IrInsn *ht = hb->ninsns ? &hb->insns[hb->ninsns - 1] : NULL;
                 unsigned char *in = g->inloop + (size_t)bi * g->n;
@@ -1708,12 +1745,15 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
                 } else if ((latch = find_latch(f, g, bi)) >= 0) {
                     const IrBlock *lb = &f->blocks[latch];
                     const IrInsn *lt = &lb->insns[lb->ninsns - 1];
-                    LCtx dl = { latch, inner.exit, lb };
+                    LCtx dl = { latch, inner.exit, lb, d->foreign ? d->nx : -1 };
+                    if (d->foreign) d->nx += 2;
                     emit(d, depth, "do {");
                     Snap s; snap_take(d, &s);
                     structure(d, f, g, bi, latch, &dl, depth + 1, 1);
                     for (int k = 0; k < lb->ninsns - 1; k++) step(d, &lb->insns[k], depth + 1, NULL);
+                    d->fixed_x = dl.lx;
                     materialize(d, depth + 1);
+                    d->fixed_x = -1;
                     Ex c = br_cond(d, lt, lb);
                     if (thread(f, lt->a.block) != bi) c = ex_un("!", c);
                     { char bb[1024]; emit(d, depth, "} while (%s);", bare(c.s, bb, sizeof bb)); }
@@ -1760,7 +1800,7 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
             emit(d, depth + 1, "break;");
             emit(d, depth, "}");
             if (stop == lc->header) return;
-            emit(d, depth, "continue;");
+            emit_continue(d, lc, depth);
             return;
         }
         if (lc && (ta == lc->exit || ta == lc->header || fb == lc->exit || fb == lc->header)) {
@@ -1768,7 +1808,8 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
             int other = jump == ta ? fb : ta;
             if (jump != ta) c = ex_un("!", c);
             emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb)); ex_free(c);
-            emit(d, depth + 1, jump == lc->exit ? "break;" : "continue;");
+            if (jump == lc->exit) emit(d, depth + 1, "break;");
+            else emit_continue(d, lc, depth + 1);
             emit(d, depth, "}");
             bi = other;
             continue;
@@ -1898,6 +1939,7 @@ static void decompile_fun(D *d, Fun *fi) {
     G g;
     d->vused = 0;
     d->frame = d->foreign ? frame_size(f) : 0;
+    d->fixed_x = -1;
     if (g_build(d, f, &g) == 0) {
         /* Pass 1 (discarded) collects hints; pass 2 prints. */
         int hdr_nx = 0;

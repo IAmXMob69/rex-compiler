@@ -175,18 +175,20 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
     case X86_SHL: case X86_SHR: case X86_SAR:
         /* If a flag-user follows in this block, materialize cmp before add/sub
          * (same flags as the alu) so ja/jg after sub $imm,reg works. */
+        int own_cmp = 0;
         if ((in->op == X86_ADD || in->op == X86_SUB) && !last_in_block) {
             const X86Insn *nx = l->in + 1;
             if (nx->op == X86_JCC || nx->op == X86_SETCC || nx->op == X86_CMOVCC) {
                 i = emit(l, IR_CMP); i->a = d; i->b = s;
                 l->flags = FL_CMP;
+                own_cmp = 1;
             }
         }
         wrote(l, d);
         i = emit(l, alu_op(in->op));
         i->dst = d; i->a = d; i->b = s;
         if (in->op >= X86_SHL && in->op <= X86_SAR && !(s.kind == IR_O_IMM && (s.imm & 63) != 0)) l->flags = FL_NONE;
-        else if (l->flags != FL_CMP) { l->flags = FL_RESULT; l->res = d; }
+        else if (!own_cmp) { l->flags = FL_RESULT; l->res = d; }  /* an older cmp no longer holds */
         zext32(l, d);
         break;
     case X86_INC: case X86_DEC:
