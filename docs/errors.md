@@ -47,6 +47,9 @@ Each entry below is the plain sentence REX prints, then a one-line fix.
 - **E400** — I couldn't map out all the paths this program can take.
   Fix: run `rex show --cfg <prog>` to see where it broke.
 - **E401** — The program jumps to a spot it only figures out while running, so I can't follow it.
+  Raised for a computed goto, a switch table REX cannot read, or a table whose
+  bounds check another path skips. A jump through a function pointer or a
+  constant is a tail call, not E401.
   Fix: same as E400.
 - **E402** — This program's paths are too tangled for me to follow right now.
   Fix: same as E400.
