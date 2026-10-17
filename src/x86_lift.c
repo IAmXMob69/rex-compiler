@@ -82,6 +82,16 @@ static void zext32(L *l, IrOperand d) {
  * The flags (CF/OF: high half not the extension of the low) are not
  * modelled: a later use fails with E301. */
 enum { MUL_SPILL = -136 };
+/* A lift that needs a scratch register borrows r11 and puts it back: its value
+ * is kept in the same slot below the red zone, since a caller may keep r11
+ * live across a call to a function that (it knows) does not touch it. */
+static IrOperand scratch_save(L *l, int r) {
+    IrInsn *i = emit(l, IR_STORE); i->dst = ir_mem(4, IR_NOREG, 1, MUL_SPILL, 8); i->a = ir_reg(r, 8);
+    return ir_reg(r, 8);
+}
+static void scratch_restore(L *l, int r) {
+    IrInsn *i = emit(l, IR_LOAD); i->dst = ir_reg(r, 8); i->a = ir_mem(4, IR_NOREG, 1, MUL_SPILL, 8);
+}
 static void lift_mul1(L *l, const X86Insn *in, IrOperand s, int sgn) {
     int w = s.width;
     (void)in;
@@ -161,19 +171,27 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
             if (d.reg == 11 || s.reg == 11) scratch = 10;
             if (d.reg == scratch || s.reg == scratch) { lfail(l, "xchg needs a free scratch"); break; }
             wrote(l, d); wrote(l, s);
+            scratch_save(l, scratch);
             i = emit(l, IR_MOV); i->dst = ir_reg(scratch, d.width); i->a = d;
             i = emit(l, IR_MOV); i->dst = d; i->a = s; if (d.width == 4) zext32(l, d);
             i = emit(l, IR_MOV); i->dst = s; i->a = ir_reg(scratch, s.width); if (s.width == 4) zext32(l, s);
+            scratch_restore(l, scratch);
         } else if (d.kind == IR_O_MEM && s.kind == IR_O_REG) {
             wrote(l, s);
+            if (s.reg == 11 || d.base == 11 || d.index == 11 || (d.base == 4 && d.index == IR_NOREG && d.disp > MUL_SPILL - 8 && d.disp < MUL_SPILL + 8)) { lfail(l, "xchg form not supported"); break; }
+            scratch_save(l, 11);
             i = emit(l, IR_MOV); i->dst = ir_reg(11, s.width); i->a = s;
             i = emit(l, IR_LOAD); i->dst = s; i->a = d; if (s.width == 4) zext32(l, s);
             i = emit(l, IR_STORE); i->dst = d; i->a = ir_reg(11, s.width);
+            scratch_restore(l, 11);
         } else if (d.kind == IR_O_REG && s.kind == IR_O_MEM) {
             wrote(l, d);
+            if (d.reg == 11 || s.base == 11 || s.index == 11 || (s.base == 4 && s.index == IR_NOREG && s.disp > MUL_SPILL - 8 && s.disp < MUL_SPILL + 8)) { lfail(l, "xchg form not supported"); break; }
+            scratch_save(l, 11);
             i = emit(l, IR_MOV); i->dst = ir_reg(11, d.width); i->a = d;
             i = emit(l, IR_LOAD); i->dst = d; i->a = s; if (d.width == 4) zext32(l, d);
             i = emit(l, IR_STORE); i->dst = s; i->a = ir_reg(11, d.width);
+            scratch_restore(l, 11);
         } else { lfail(l, "xchg form not supported"); }
         break;
     }
@@ -288,7 +306,8 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         if (d.width == 4 && !(d.kind == IR_O_REG && (d.reg == 0 || d.reg == 2 || d.reg == 11))) {
             /* 32-bit idiv: sign-extend both sides, divide at 64 bits, zero-extend
              * the results (eax/edx writes). Only INT_MIN / -1 differs (x86 traps). */
-            wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8)); wrote(l, ir_reg(11, 8));
+            wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8));
+            scratch_save(l, 11);
             i = emit(l, IR_SEXT); i->dst = ir_reg(11, 8); i->a = d;
             i = emit(l, IR_SEXT); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 4);
             /* the 64-bit divide reads rdx:rax: rdx is the sign of the widened rax,
@@ -298,13 +317,21 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
             i = emit(l, IR_REMS); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
             i = emit(l, IR_DIVS); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
             zext32(l, ir_reg(0, 4)); zext32(l, ir_reg(2, 4));
+            scratch_restore(l, 11);
             l->flags = FL_NONE;
             break;
         }
         if (d.width != 8 || (d.kind == IR_O_REG && (d.reg == 0 || d.reg == 2))) { lfail(l, "idiv form not supported"); break; }
         wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8));
+        int borrowed = d.kind == IR_O_MEM;      /* idiv m64 (gcc -O0): divide by r11, put back */
+        if (borrowed) {
+            scratch_save(l, 11);
+            i = emit(l, IR_LOAD); i->dst = ir_reg(11, 8); i->a = d;
+            d = ir_reg(11, 8);
+        }
         i = emit(l, IR_REMS); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = d;
         i = emit(l, IR_DIVS); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 8); i->b = d;
+        if (borrowed) scratch_restore(l, 11);
         l->flags = FL_NONE;
         break;
     }
@@ -325,7 +352,8 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         if (d.kind == IR_O_REG && (d.reg == 0 || d.reg == 2 || d.reg == 11)) { lfail(l, "div by rax/rdx/r11 not supported"); break; }
         if (d.width == 4) {
             /* 32-bit div: zero-extend both sides and divide at 64 bits (exact). */
-            wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8)); wrote(l, ir_reg(11, 8));
+            wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8));
+            scratch_save(l, 11);
             if (d.kind == IR_O_MEM) { i = emit(l, IR_LOAD); i->dst = ir_reg(11, 4); i->a = d; }
             else { i = emit(l, IR_MOV); i->dst = ir_reg(11, 4); i->a = d; }
             zext32(l, ir_reg(11, 4));
@@ -333,19 +361,22 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
             i = emit(l, IR_MOV); i->dst = ir_reg(2, 8); i->a = ir_imm(0, 8);
             i = emit(l, IR_REMU); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
             i = emit(l, IR_DIVU); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
+            scratch_restore(l, 11);
             l->flags = FL_NONE;
             break;
         }
         if (d.width != 8) { lfail(l, "8/16-bit div is not supported"); break; }
         wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8));
-        if (d.kind == IR_O_MEM) {
-            wrote(l, ir_reg(11, 8));
+        int borrowed = d.kind == IR_O_MEM;
+        if (borrowed) {
+            scratch_save(l, 11);
             i = emit(l, IR_LOAD); i->dst = ir_reg(11, 8); i->a = d;
             d = ir_reg(11, 8);
         }
         i = emit(l, IR_MOV); i->dst = ir_reg(2, 8); i->a = ir_imm(0, 8);
         i = emit(l, IR_REMU); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = d;
         i = emit(l, IR_DIVU); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 8); i->b = d;
+        if (borrowed) scratch_restore(l, 11);
         l->flags = FL_NONE;
         break;
     }

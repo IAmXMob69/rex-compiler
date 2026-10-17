@@ -1,12 +1,20 @@
 /* tests/dyn.sh: 32/64-bit div and idiv rebuilt by rex compare (no C library,
  * so _start exits by syscall). A sign sweep (a negative 32-bit dividend once
  * made the rebuilt idiv fault), and work(), where gcc -O2 keeps values in
- * r11 and rcx across calls to dv/du because it knows they don't touch them. */
+ * r11 and rcx across calls to dv/du because it knows they don't touch them;
+ * keep11() checks r11 survives a function the lift gives an xchg scratch. */
 typedef unsigned long u64;
 __attribute__((noinline)) static int dv(int a, int b){ return a / b + a % b; }
 __attribute__((noinline)) static unsigned du(unsigned a, unsigned b){ return a / b * 3 + a % b; }
 __attribute__((noinline)) static long dq(long a, long b){ return a / b * 7 + a % b; }
 __attribute__((noinline)) static u64 duq(u64 a, const u64 *b){ return a / *b + a % *b; }
+__attribute__((noinline, used)) u64 xf(u64 a, u64 b){ u64 m = b; __asm__("xchg %0, %1; xchg %0, %2" : "+r"(a), "+r"(b), "+m"(m)); return a * 3 + b + m; }
+__attribute__((noinline)) static u64 keep11(u64 x){
+    u64 r, k;
+    __asm__ volatile("mov %2, %%r11; mov %2, %%rdi; mov $5, %%esi; call xf; mov %%r11, %1; mov %%rax, %0"
+                     : "=r"(r), "=r"(k) : "r"(x) : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory", "cc");
+    return r ^ (k * 1000);
+}
 __attribute__((noinline)) int work(int *p, int n){
     int a0=p[0],a1=p[1],a2=p[2],a3=p[3],a4=p[4],a5=p[5],a6=p[6],a7=p[7],a8=p[8],a9=p[9],a10=p[10],a11=p[11],a12=p[12];
     int s = 0;
@@ -31,6 +39,7 @@ __attribute__((force_align_arg_pointer)) void _start(void){
         }
     int v[13]; for (volatile int i = 0; i < 13; i++) v[i] = i * 7 - 20;
     h = h * 31 + (unsigned)work(v, 40);
+    h = h * 31 + keep11(h & 0xffff);
     __asm__ volatile("mov %0, %%rdi; mov $60, %%eax; syscall" :: "r"(h % 253) : "rdi", "rax");
     __builtin_unreachable();
 }

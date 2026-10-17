@@ -239,10 +239,15 @@ printf '%s\n' '__attribute__((noinline)) int mb(unsigned char a, unsigned char b
 gcc -O2 -no-pie -fno-pic -o "$T/drop" "$T/drop.c"
 set +e; ./rex tosource "$T/drop" -o "$T/drop.rex" 2> "$T/drop.err"; rc=$?; set -e
 test $rc -ne 0 && grep -q "E300: mb at 0x[0-9a-f]*: 8-bit one-operand mul" "$T/drop.err"
-# 32/64-bit div and idiv rebuilt, every sign (tests/dec/divfs.c)
-for cc in gcc clang; do for o in O1 O3; do
+# 32/64-bit div and idiv rebuilt, every sign, r11 kept across a call
+# (tests/dec/divfs.c); the same through match (tests/dec/divr11.c)
+for cc in gcc clang; do for o in O0 O1 O2 O3; do
     $cc -$o -static -nostdlib -fno-pic -fno-stack-protector -o "$T/divfs" tests/dec/divfs.c
     ./rex compare "$T/divfs" -o "$T/divfs.out" >/dev/null 2>&1
+done; done
+for cc in gcc clang; do for o in O2 O3; do
+    $cc -$o -no-pie -fno-pic -o "$T/divr11" tests/dec/divr11.c
+    ./rex match "$T/divr11" -o "$T/divr11.rex" >/dev/null 2>&1
 done; done
 # xmm values have no encoding in the rebuild yet: refused with E500, never
 # aliased onto a general register (tests/dec/ssefs.c)

@@ -236,6 +236,34 @@ static Fun *fby(D *d, uint64_t a) {
  * builtin, an external address or a register is treated as a full clobber. A
  * value a caller leaves in a caller-saved register across a call to a function
  * that provably never writes that register survives the call. */
+/* The lift borrows a scratch register by saving it to rsp-136 and loading it
+ * back in the same block (x86_lift.c scratch_save): a write between the two,
+ * with nothing in between that moves rsp, calls or reuses the slot, leaves the
+ * register as the caller had it. */
+static int is_slot136(const IrOperand *o) {
+    return o->kind == IR_O_MEM && o->base == 4 && o->index == IR_NOREG && o->disp == -136 && o->width == 8;
+}
+static int scratch_bracketed(const IrBlock *B, int k, int r) {
+    int lo = -1, hi = -1;
+    const IrInsn *self = &B->insns[k];
+    int restore = self->op == IR_LOAD && is_slot136(&self->a);   /* the load back itself */
+    for (int j = k - 1; j >= 0; j--) {
+        const IrInsn *q = &B->insns[j];
+        if (q->op == IR_STORE && is_slot136(&q->dst) && q->a.kind == IR_O_REG && q->a.reg == r && q->a.width == 8) { lo = j; break; }
+        if (q->op == IR_CALL || q->op == IR_SYSCALL || q->op == IR_PUSH || q->op == IR_POP || (q->dst.kind == IR_O_REG && q->dst.reg == 4) ||
+            (q->op == IR_STORE && q->dst.kind == IR_O_MEM && q->dst.base == 4 && q->dst.index == IR_NOREG && q->dst.disp > -144 && q->dst.disp < -128)) return 0;
+    }
+    if (lo < 0) return 0;
+    if (restore) return 1;
+    for (int j = k + 1; j < B->ninsns; j++) {
+        const IrInsn *q = &B->insns[j];
+        if (q->op == IR_LOAD && q->dst.kind == IR_O_REG && q->dst.reg == r && q->dst.width == 8 && is_slot136(&q->a)) { hi = j; break; }
+        if (q->op == IR_CALL || q->op == IR_SYSCALL || q->op == IR_PUSH || q->op == IR_POP || (q->dst.kind == IR_O_REG && q->dst.reg == 4) ||
+            (q->op == IR_STORE && q->dst.kind == IR_O_MEM && q->dst.base == 4 && q->dst.index == IR_NOREG && q->dst.disp > -144 && q->dst.disp < -128)) return 0;
+    }
+    return hi >= 0;
+}
+
 static void compute_clobbers(D *d) {
     int n = d->nfun;
     for (int i = 0; i < n; i++) {
@@ -252,7 +280,8 @@ static void compute_clobbers(D *d) {
                         if (!t || t->kind == 3) b |= CLOB_SAVED;  /* builtin/external */
                     } else b |= CLOB_SAVED;                       /* indirect */
                 }
-                if (in->dst.kind == IR_O_REG && in->dst.reg >= 0 && in->dst.reg < 16)
+                if (in->dst.kind == IR_O_REG && in->dst.reg >= 0 && in->dst.reg < 16 &&
+                    !scratch_bracketed(B, k, in->dst.reg))
                     b |= 1u << in->dst.reg;
             }
         }
