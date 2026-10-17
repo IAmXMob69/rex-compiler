@@ -1725,7 +1725,7 @@ static int g_build(D *d, const IrFunc *f, G *g) {
     return 0;
 }
 
-typedef struct { int header, exit; const IrBlock *latch; int lx; } LCtx;  /* lx: x temps reserved for the latch compare */  /* latch: do-while tail run before continue */
+typedef struct LCtx { int header, exit; const IrBlock *latch; int lx; int hdr; const struct LCtx *up; } LCtx;  /* hdr: the loop's header block; up: the enclosing loop */  /* lx: x temps reserved for the latch compare */  /* latch: do-while tail run before continue */
 
 typedef struct { Ex reg[16]; int has[16]; int nstk; } Snap;
 static void snap_take(D *d, Snap *s) {
@@ -2208,10 +2208,19 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
                 return;
             }
             if (lc && bi == lc->exit) { emit(d, depth, "break;"); return; }
+            /* Back at the header of a loop that is already open around us, but not
+             * by its own continue: that is a continue of an outer loop, which REX
+             * cannot spell. Opening the loop again here would nest a copy of it in
+             * itself, over and over, and the innermost copy would be wrong. */
+            for (const LCtx *p = lc; p; p = p->up)
+                if (bi == p->hdr) {
+                    if (!g_struct_fail) { g_struct_fail = 1; g_struct_fail_fn = f->name; }
+                    return;
+                }
             if (g->loop_exit[bi] != -2 && !(lc && lc->header == bi)) {
                 int latch;
                 flush_decls(d);
-                LCtx inner = { bi, g->loop_exit[bi], NULL, -1 };
+                LCtx inner = { bi, g->loop_exit[bi], NULL, -1, bi, lc };
                 const IrBlock *hb = &f->blocks[bi];
                 const IrInsn *ht = hb->ninsns ? &hb->insns[hb->ninsns - 1] : NULL;
                 unsigned char *in = g->inloop + (size_t)bi * g->n;
@@ -2232,7 +2241,7 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
                 } else if ((latch = find_latch(f, g, bi)) >= 0) {
                     const IrBlock *lb = &f->blocks[latch];
                     const IrInsn *lt = &lb->insns[lb->ninsns - 1];
-                    LCtx dl = { latch, inner.exit, lb, d->foreign ? d->nx : -1 };
+                    LCtx dl = { latch, inner.exit, lb, d->foreign ? d->nx : -1, bi, lc };
                     if (d->foreign) d->nx += 2;
                     emit(d, depth, "do {");
                     Snap s; snap_take(d, &s);
@@ -2346,6 +2355,9 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
         if (join < 0 || ret_join) return;
         bi = join;
     }
+    /* The walk ran out of budget in the middle of a region, so what it emitted
+     * is cut short: fail like the depth limit does, never return quietly. */
+    if (g_budget < 0 && !g_struct_fail) { g_struct_fail = 1; g_struct_fail_fn = f->name; }
 }
 
 /* After the discarded pass: arrays (indexed + bounds-checked) and structs
