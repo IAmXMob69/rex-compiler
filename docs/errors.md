@@ -80,6 +80,15 @@ Each entry below is the plain sentence REX prints, then a one-line fix.
   Fix: use `rex tosource` (or `rebuild`) without checking, and run the result
   yourself.
 
+- **E605** — This program calls a function through a pointer in a way I can't write in .rex yet.
+  A call through a register or memory becomes `callp(pointer, args...)`, which
+  picks the recovered function whose original address the pointer holds. That
+  needs a recovered function with its address taken, taking at most 5
+  arguments (the pointer is the sixth). A pointer to a C library function, or
+  to a function with 6 arguments, is refused before building. `match` and
+  `--verify` stop with exit status 93; `tosource` still writes the source.
+  Fix: none yet in REX; the line names the function or the reason.
+
 ## Not yet in the code
 
 Shorter command-line, runtime, and `.rex` language codes (ranges E001–E012 and

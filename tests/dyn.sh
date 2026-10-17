@@ -79,15 +79,39 @@ for cc in gcc clang; do
     ./rex match "$T/st_$cc" -o "$T/st_$cc.rex" >/dev/null 2>&1
 done
 # recovered source that does not build is refused with one plain line and
-# E603 (exit 91); the compiler's own messages never reach the user
+# E603 (exit 91); the compiler's own messages never reach the user (here:
+# more stack slots than the decompiler names)
+python3 -c "
+print('__attribute__((noinline)) int many(int x){')
+for i in range(70): print('  volatile int a%d = x + %d;' % (i, i))
+print('  return ' + ' + '.join('a%d' % i for i in range(70)) + ';}')
+print('int main(void){ return many(3) & 255; }')" > "$T/many.c"
+gcc -O0 -no-pie -fno-pic -o "$T/many" "$T/many.c"
+set +e; ./rex match "$T/many" -o "$T/many.rex" > "$T/many.out" 2> "$T/many.err"; rc=$?; set -e
+test $rc -eq 91
+grep -q "doesn't build" "$T/many.err" && grep -q "E603: .* line [0-9]*: " "$T/many.err"
+test $(wc -l < "$T/many.err") -eq 2
+! grep -q "aborting" "$T/many.err" "$T/many.out"
+# calls through function pointers go through callp, which picks the recovered
+# function by the original address the pointer holds (tests/dec/fptr.c:
+# a table, a pointer argument, a struct of pointers; and a tail call)
 printf '%s\n' 'static int sq(int x){return x*x;}' 'int (*volatile fp)(int) = sq;' \
     'int main(void){return fp(3);}' > "$T/fp.c"
-gcc -O1 -no-pie -fno-pic -o "$T/fp" "$T/fp.c"
-set +e; ./rex match "$T/fp" -o "$T/fp.rex" > "$T/fp.out" 2> "$T/fp.err"; rc=$?; set -e
-test $rc -eq 91
-grep -q "doesn't build" "$T/fp.err" && grep -q "E603: .* line [0-9]*: " "$T/fp.err"
-test $(wc -l < "$T/fp.err") -eq 2
-! grep -q "aborting" "$T/fp.err" "$T/fp.out"
+printf '%s\n' '__attribute__((noinline)) int sq(int x){ return x * x + 1; }' 'int (*volatile fp)(int) = sq;' \
+    '__attribute__((noinline)) int tail(int x){ return fp(x + 1); }' \
+    'int main(void){ int s = 0; for (int i = 0; i < 10; i++) s += tail(i); return s & 255; }' > "$T/tcp.c"
+for cc in gcc clang; do for o in O0 O2; do for pie in "-no-pie -fno-pic" "-pie -fpie"; do
+    for p in fp tcp; do $cc -$o $pie -o "$T/$p" "$T/$p.c"; ./rex match "$T/$p" -o "$T/$p.rex" >/dev/null 2>&1; done
+    $cc -$o $pie -o "$T/fptr" tests/dec/fptr.c; ./rex match "$T/fptr" -o "$T/fptr.rex" >/dev/null 2>&1
+done; done; done
+grep -q "^fn callp(p, a, b)" "$T/fptr.rex"
+# a target with 6 arguments leaves no room for the pointer (REX takes at most
+# 6 parameters): match refuses with E605 (exit 93) before building
+printf '%s\n' '__attribute__((noinline)) long f6(long a, long b, long c, long d, long e, long f){ return a + 2*b + 3*c + 4*d + 5*e + 6*f; }' \
+    'long (*volatile p)(long, long, long, long, long, long) = f6;' 'int main(void){ return (int)(p(1, 2, 3, 4, 5, 6) & 255); }' > "$T/six.c"
+gcc -O1 -no-pie -fno-pic -o "$T/six" "$T/six.c"
+set +e; ./rex match "$T/six" -o "$T/six.rex" 2> "$T/six.err"; rc=$?; set -e
+test $rc -eq 93 && grep -q "E605: f[0-9]* takes 6 arguments" "$T/six.err" && test $(wc -l < "$T/six.err") -eq 2
 # a dynamic _start passes main to the C library in rdi: main is found from
 # there, so a stripped program still has one, and a main that cannot be built
 # is reported instead of dropped (which left a source without main)

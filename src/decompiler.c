@@ -176,6 +176,7 @@ typedef struct {
     unsigned clob;  /* caller-saved registers this function may modify (transitively) */
     int reach;      /* reached from main by a call or a taken address */
     int shape;      /* kind 3 by the shape of a REX string helper, not by a syscall */
+    int taken;      /* its address is a value (operand or pointer in data): a callp target */
 } Fun;
 
 typedef struct {
@@ -200,6 +201,9 @@ typedef struct {
     int nstruct;
     int need_udiv;      /* emit the udiv/urem helpers */
     int need_mulh;      /* emit the umulh/smulh helpers (one-operand 64-bit mul) */
+    int need_callp;     /* emit callp: a call through a function pointer */
+    int callp_n;        /* arguments callp passes on: the most any target takes, at most 5 */
+    char callp_why[160];/* why callp cannot stand for every pointer call (match refuses, E605) */
     int need_gfr;       /* global gfr hands a new frame block to a local */
     int frame;          /* foreign: current function's stack lives in heap block fr (0 = off, else half size) */
     int fp;             /* foreign: rbp is a real frame pointer (mov %rsp,%rbp), not a general callee-saved register */
@@ -1135,6 +1139,64 @@ static void shape_reached(D *d) {
     if (any) { foreign_args(d); compute_clobbers(d); }
 }
 
+/* Calls through a function pointer become callp(p, ...), which picks the
+ * recovered function whose original address p holds. Its targets are the
+ * functions whose address is a value: an operand other than a direct call,
+ * or a pointer stored in the program's data. REX takes at most 6
+ * parameters, the pointer and 5 arguments; a target that needs 6, or a
+ * pointer call with no recovered target at all, cannot be written, and
+ * match refuses with E605 (the source is still written for reading). */
+static int g_fpcall;
+static char g_fpwhy[160];
+int rex_decompile_fpcalls(char *why, size_t n) {
+    if (g_fpcall && why && n) snprintf(why, n, "%s", g_fpwhy);
+    return g_fpcall;
+}
+static void compute_taken(D *d) {
+    for (int i = 0; i < d->nfun; i++) {
+        if (d->fun[i].kind == 1 || d->fun[i].kind == 3) continue;   /* start code and runtime helpers */
+        const IrFunc *f = &d->m->funcs[i];
+        for (int b = 0; b < f->nblocks; b++)
+            for (int k = 0; k < f->blocks[b].ninsns; k++) {
+                const IrInsn *in = &f->blocks[b].insns[k];
+                const IrOperand *op[3] = { &in->dst, &in->a, &in->b };
+                for (int o = 0; o < 3; o++) {
+                    if (o == 1 && (in->op == IR_CALL || in->op == IR_JMP)) continue;   /* a direct call or jump */
+                    uint64_t v;
+                    if (op[o]->kind == IR_O_ADDR) v = op[o]->addr;
+                    else if (op[o]->kind == IR_O_IMM) v = (uint64_t)op[o]->imm;
+                    else continue;
+                    Fun *t = fby(d, v);
+                    if (t) t->taken = 1;
+                }
+            }
+    }
+    const RexElf *e = d->elf;
+    for (int s2 = 0; e && s2 < e->nsh; s2++) {
+        const RexShdr *sh = &e->sh[s2];
+        /* the program's data: not code, not the C runtime's tables or the GOT */
+        if (sh->type != 1 || !(sh->flags & 2) || (sh->flags & 4) || !strncmp(sh->name, ".got", 4) ||
+            !strncmp(sh->name, ".eh_frame", 9) || sh->offset > e->size || sh->size > e->size - sh->offset) continue;
+        for (uint64_t o = (8 - (sh->addr & 7)) & 7; o + 8 <= sh->size; o += 8) {
+            uint64_t v;
+            memcpy(&v, e->data + sh->offset + o, 8);
+            Fun *t = fby(d, v);
+            if (t) t->taken = 1;
+        }
+    }
+    d->callp_n = 0; d->callp_why[0] = 0;
+    int nt = 0;
+    for (int i = 0; i < d->nfun; i++) {
+        const Fun *fi = &d->fun[i];
+        if (fi->kind != 0 || !fi->taken) continue;   /* REX never calls main */
+        int na = fi->nargs;
+        if (na > 5) { snprintf(d->callp_why, sizeof d->callp_why, "%s takes %d arguments; a REX function takes the pointer and at most 5", fi->name, na); continue; }
+        nt++;
+        if (na > d->callp_n) d->callp_n = na;
+    }
+    if (!nt && !d->callp_why[0]) snprintf(d->callp_why, sizeof d->callp_why, "no recovered function has its address taken");
+}
+
 /* Library calls (puts, printf) reached through the PLT or a GOT slot. Counted
  * so match can refuse: the rebuilt program has no libc to call into. */
 static int g_libcalls;
@@ -1311,6 +1373,7 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     case IR_CALL: {
         Fun *t = in->a.kind == IR_O_ADDR ? fby(d, in->a.addr) : NULL;
         const char *nm = "fn";
+        char pre[512] = "";   /* callp: the pointer, before the arguments */
         int na = 0, lib_void = 0;
         const char *imp = NULL;
         if (!t && d->elf) {
@@ -1333,6 +1396,19 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
                 else na = t->nargs;
             }
             else { nm = t->name; na = t->nargs; }
+        } else if (d->foreign && (in->a.kind == IR_O_REG || in->a.kind == IR_O_MEM)) {
+            /* A call through a function pointer: REX has no function values, so
+             * callp picks the recovered function by its original address (which
+             * is what the pointer holds) and passes it the argument registers.
+             * It is emitted like any other call below. */
+            Ex tg = in->a.kind == IR_O_REG ? getr(d, in->a.reg) : op_ex(d, &in->a);
+            char bb[512];
+            snprintf(pre, sizeof pre, "%s", bare(tg.s, bb, sizeof bb));
+            ex_free(tg);
+            nm = "callp"; na = d->callp_n;
+            d->need_callp = 1;
+            if ((!d->cur || d->cur->reach) && d->callp_why[0] && !g_fpcall++)
+                snprintf(g_fpwhy, sizeof g_fpwhy, "%s", d->callp_why);
         } else if (in->a.kind == IR_O_REG) {
             Ex tg = getr(d, in->a.reg);
             nm = tg.s; /* will leak into call string */
@@ -1352,11 +1428,12 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             if (emit_call) *emit_call = 1;
             break;
         }
-        char args[512] = "";
+        char args[1024] = "";
+        snprintf(args, sizeof args, "%s", pre);
         for (int a = 0; a < na; a++) {
             Ex e = getr(d, ARG[a]);
             char bb[512];
-            if (a) strncat(args, ", ", sizeof(args) - strlen(args) - 1);
+            if (a || pre[0]) strncat(args, ", ", sizeof(args) - strlen(args) - 1);
             strncat(args, bare(e.s, bb, sizeof bb), sizeof(args) - strlen(args) - 1);
             ex_free(e);
         }
@@ -3043,6 +3120,8 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     g_libcalls = 0; g_libname[0] = 0;
     compute_reach(&d);
     if (d.foreign) shape_reached(&d);
+    if (d.foreign) compute_taken(&d);
+    g_fpcall = 0; g_fpwhy[0] = 0;
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 0) decompile_fun(&d, &d.fun[i]);
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 2) decompile_fun(&d, &d.fun[i]);
     if (g_struct_fail) {
@@ -3111,6 +3190,26 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
             "    if (b < 0) { h = h - a; }\n"
             "    return h;\n"
             "}\n\n");
+    if (d.need_callp) {
+        /* the functions whose address is a value, by that address in the original */
+        fprintf(out, "// a call through a function pointer: the pointer holds an original address\n"
+                     "fn callp(p");
+        static const char *pn[5] = { "a", "b", "c", "d", "e" };
+        for (int a = 0; a < d.callp_n; a++) fprintf(out, ", %s", pn[a]);
+        fprintf(out, ") {\n");
+        for (int i = 0; i < d.nfun; i++) {
+            const Fun *fi = &d.fun[i];
+            if (fi->kind != 0 || !fi->taken) continue;
+            int na = fi->nargs;
+            if (na > 5) { fprintf(out, "    // %s takes %d arguments: left out\n", fi->name, na); continue; }
+            fprintf(out, "    if (p == %llu) { return %s(", (unsigned long long)m->funcs[i].addr, fi->name);
+            for (int a = 0; a < na; a++) fprintf(out, "%s%s", a ? ", " : "", pn[a]);
+            fprintf(out, "); }\n");
+        }
+        fprintf(out, "    let z = 0;\n"
+                     "    return 1 / z; // not a function REX recovered: stop, as a jump there would\n"
+                     "}\n\n");
+    }
     if (d.need_gfr) fprintf(out, "let gfr = 0;%s\n", d.blob ? "" : "\n");
     if (d.blob) {
         fprintf(out, "let gmem = 0; // data sections 0x%llx..0x%llx\n\n", (unsigned long long)d.blo, (unsigned long long)d.bhi);

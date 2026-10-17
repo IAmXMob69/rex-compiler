@@ -2511,6 +2511,7 @@ int rex_cmd_ir(const char *path, const char *fname);
 int rex_recompile(const char *in, const char *out, int debug);
 int rex_decompile(const char *in, const char *out, int verbose);
 int rex_decompile_libcalls(char *name, size_t n);
+int rex_decompile_fpcalls(char *why, size_t n);
 
 static int compile_to(const char *srcpath, const char *outbin);
 
@@ -2574,6 +2575,17 @@ static int refuse_libcalls(const char *out) {
     rex_errf(err, sizeof err, REX_E602_LIBCALL, "%s() comes from a shared library; the source is in %s", lib, out);
     rex_refuse(err);
     return REX_E602_LIBCALL;
+}
+
+/* A call through a function pointer that callp cannot stand for: refuse
+ * with E605 before building, rather than a mismatch or a confusing error. */
+static int refuse_fpcalls(const char *out) {
+    char why[160];
+    if (!rex_decompile_fpcalls(why, sizeof why)) return 0;
+    char err[512];
+    rex_errf(err, sizeof err, REX_E605_FPCALL, "%s; the source is in %s", why, out);
+    rex_refuse(err);
+    return REX_E605_FPCALL;
 }
 
 static const char *alias_cmd(const char *c) {
@@ -2657,6 +2669,7 @@ int main(int argc, char **argv) {
         int rc = rex_decompile(in, out, verbose);
         if (rc) return rc;
         if ((rc = refuse_libcalls(out))) return rc;
+        if ((rc = refuse_fpcalls(out))) return rc;
         char tmp[] = "/tmp/rexverXXXXXX";
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
         if ((rc = compile_recovered(out, tmp))) { unlink(tmp); return rc; }
@@ -2696,6 +2709,7 @@ int main(int argc, char **argv) {
         int rc = rex_decompile(in, out, verbose);
         if (rc || !verify) return rc;
         if ((rc = refuse_libcalls(out))) return rc;
+        if ((rc = refuse_fpcalls(out))) return rc;
         /* Rebuild decompiled source and compare behavior to the original. */
         char tmp[] = "/tmp/rexverXXXXXX";
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
