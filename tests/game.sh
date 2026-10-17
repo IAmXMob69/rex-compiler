@@ -55,6 +55,11 @@ if command -v clang >/dev/null 2>&1; then
         build clang O0 $s
         ./rex compare "$T/${s}_clang_O0" -o "$T/c0.re" >/dev/null
     done
+    # clang -O1 keeps the accumulator in rbp (a callee-saved register) across the
+    # calls; rbp is only the frame pointer when established with mov %rsp,%rbp, so
+    # here it must stay an ordinary variable or the running total is lost.
+    clang -O1 $G -o "$T/chains_clang_O1" tests/chains.c
+    ./rex match "$T/chains_clang_O1" -o "$T/chc1.rex" >/dev/null
 fi
 # global array (data sections in gmem) and memory read-modify-write at -O0
 for o in O0 O1; do

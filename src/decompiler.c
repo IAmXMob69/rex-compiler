@@ -198,6 +198,7 @@ typedef struct {
     int need_udiv;      /* emit the udiv/urem helpers */
     int need_gfr;       /* global gfr hands a new frame block to a local */
     int frame;          /* foreign: current function's stack lives in heap block fr (0 = off, else half size) */
+    int fp;             /* foreign: rbp is a real frame pointer (mov %rsp,%rbp), not a general callee-saved register */
     int blob;           /* foreign: data sections live in one heap block gmem */
     uint64_t blo, bhi;  /* address range of that block */
     int foreign;        /* not REX-built (has section headers): register variables, exact widths */
@@ -429,7 +430,7 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
         const char *g = glob_name(d, (uint64_t)o->disp, o->width ? o->width : 8);
         if (g) return ex(g);
     }
-    if (d->frame && (o->base == 4 || o->base == 5)) {
+    if (d->frame && (o->base == 4 || (o->base == 5 && d->fp))) {
         Ex b = getr(d, o->base);
         if (o->index != IR_NOREG) {
             Ex ix = getr(d, o->index);
@@ -765,7 +766,7 @@ static void pin_reads(D *d, int depth, const char *name) {
     if (!d->foreign) return;
     char bb[1024];
     for (int r = 0; r < 16; r++) {
-        if (!d->has[r] || r == 4 || (r == 5 && d->frame)) continue;
+        if (!d->has[r] || r == 4 || (r == 5 && d->frame && d->fp)) continue;
         const char *e = d->reg[r].s;
         if (name ? !mentions_v(e, name) : !strstr(e, "*(")) continue;
         int k = d->nx++;
@@ -1464,7 +1465,7 @@ static void materialize(D *d, int depth) {
     int pend[16], np = 0;
     char nm[8];
     for (int r = 0; r < 16; r++) {
-        if (r == 4 || !d->has[r] || (r == 5 && d->frame)) continue;
+        if (r == 4 || !d->has[r] || (r == 5 && d->frame && d->fp)) continue;
         snprintf(nm, sizeof nm, "v%d", r);
         if (!strcmp(d->reg[r].s, nm)) continue;
         pend[np++] = r;
@@ -2076,6 +2077,15 @@ static void finish_hints(D *d, const IrFunc *f, Fun *fi) {
 /* Foreign function whose stack is indexed, address-taken or copied: its
  * frame moves to a heap block fr (rsp and rbp both start at fr). Returns
  * the half size of that block, 0 when plain locals suffice. */
+static int frame_has_fp(const IrFunc *f) {
+    for (int b = 0; b < f->nblocks; b++)
+        for (int k = 0; k < f->blocks[b].ninsns; k++) {
+            const IrInsn *in = &f->blocks[b].insns[k];
+            if (in->op == IR_MOV && in->dst.kind == IR_O_REG && in->dst.reg == 5 &&
+                in->a.kind == IR_O_REG && in->a.reg == 4) return 1;
+        }
+    return 0;
+}
 static int frame_size(const IrFunc *f) {
     int need = 0;
     long long far = 0;
@@ -2277,6 +2287,7 @@ static void decompile_fun(D *d, Fun *fi) {
     G g;
     d->vused = 0;
     d->frame = d->foreign ? frame_size(f) : 0;
+    d->fp = d->foreign ? frame_has_fp(f) : 0;
     d->fixed_x = -1;
     if (g_build(d, f, &g) == 0) {
         /* Pass 1 (discarded) collects hints; pass 2 prints. */
@@ -2287,7 +2298,7 @@ static void decompile_fun(D *d, Fun *fi) {
             for (int i = 0; i < 32; i++) { if (d->xhas[i]) ex_free(d->xreg[i]); d->xhas[i] = 0; }
             while (d->nstk) ex_free(d->stk[--d->nstk]);
             for (int a = 0; a < fi->nargs; a++) setr(d, ARG[a], exf("%c", 'a' + a));
-            if (d->frame) { setr(d, 4, exf("(fr + %d)", d->frame)); setr(d, 5, exf("(fr + %d)", d->frame)); }
+            if (d->frame) { setr(d, 4, exf("(fr + %d)", d->frame)); if (d->fp) setr(d, 5, exf("(fr + %d)", d->frame)); }
             d->cmp = NULL;
             memset(d->declared, 0, sizeof d->declared);
             d->flat = 1;
