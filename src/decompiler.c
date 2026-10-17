@@ -385,7 +385,7 @@ static void blob_range(D *d) {
 static int op_points_data(const D *d, const IrOperand *o) {
     if (o->kind == IR_O_IMM) return o->width >= 4 && (uint64_t)o->imm >= d->blo && (uint64_t)o->imm < d->bhi;
     if (o->kind == IR_O_MEM) return (o->base != IR_NOREG || o->index != IR_NOREG) && o->base != 4 && o->base != 5 &&
-        (uint64_t)o->disp >= d->blo && (uint64_t)o->disp < d->bhi;
+        (uint64_t)o->disp >= d->blo && (uint64_t)o->disp < d->bhi + BLOB_SLACK;  /* end-pointer idiom: base+disp with disp one past the data */
     return 0;
 }
 static void blob_scan(D *d) {

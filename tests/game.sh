@@ -18,6 +18,16 @@ printf '%s\n' '.globl _start' '_start: mov $1,%eax' ' jmp *tbl(,%rax,8)' 'a: mov
 gcc -static -nostdlib -no-pie -o "$T/nobound" "$T/nobound.s"
 ! ./rex decompile "$T/nobound" -o "$T/nb.rex" 2> "$T/nb.err"
 grep -q 'E401' "$T/nb.err"
+# end-pointer idiom: base register + displacement one past the data (map+N(%rdx)
+# with rdx negative). The data block must cover that end address (gmem), or the
+# recovered reads hit raw absolute addresses and the program crashes.
+printf '%s\n' '.intel_syntax noprefix' '.globl _start' '.section .rodata' \
+    'tbl: .byte 3,1,4,1,5' '.text' '_start:' ' call main' ' mov edi, eax' \
+    ' mov eax, 60' ' syscall' 'main:' ' xor eax, eax' ' mov rdx, -5' \
+    '.L0: movzx ecx, byte ptr [tbl+5+rdx]' ' add eax, ecx' ' inc rdx' ' jne .L0' ' ret' > "$T/endptr.s"
+gcc -static -nostdlib -no-pie -o "$T/endptr" "$T/endptr.s"
+./rex match "$T/endptr" -o "$T/endptr.rex" >/dev/null
+grep -q 'gmem + 5' "$T/endptr.rex"
 # foreign register code recovered to REX that behaves the same
 build gcc O1 rng
 ./rex match "$T/rng_gcc_O1" -o "$T/r.rex" >/dev/null
