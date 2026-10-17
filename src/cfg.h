@@ -38,6 +38,8 @@ typedef struct {
     int ninsns;
     CfgBlock *blocks;
     int nblocks;
+    uint64_t *tails;        /* jmp instructions that are tail calls to another function */
+    int ntails;
 } CfgFunc;
 
 typedef struct {
@@ -51,5 +53,8 @@ void cfg_free(CfgProgram *p);
 int cfg_find_func(const CfgProgram *p, uint64_t addr);
 int cfg_find_block(const CfgFunc *f, uint64_t addr);
 int cfg_is_exit(const X86Insn *prev, const X86Insn *in);
+
+/* Nonzero if the jmp at insn_addr in f is a tail call to another function. */
+int cfg_is_tail(const CfgFunc *f, uint64_t insn_addr);
 
 #endif

@@ -27,6 +27,19 @@ for pie in "-no-pie -fno-pic" "-pie -fPIE"; do
     # a program that never calls the library rebuilds and matches
     ./rex match "$T/sum" -o "$T/sum.rex" >/dev/null 2>&1
 done
+# clang -O1 main is "mov $10,%edi; jmp fib" with fib below it: the jmp is a tail
+# call, not fib's body merged into main (which lost the argument and gave 0)
+printf '%s\n' 'int fib(int n){if(n<2)return n;return fib(n-1)+fib(n-2);}' \
+    'int main(void){return fib(10);}' > "$T/rec.c"
+clang -O1 -no-pie -fno-pic -o "$T/rec" "$T/rec.c"
+./rex match "$T/rec" -o "$T/rec.rex" >/dev/null 2>&1
+grep -q 'f[0-9]*(10)' "$T/rec.rex"
+# gcc -O2 fib needs a continue of an outer loop, which REX cannot spell. It must
+# refuse with E402 and write nothing, never print a copy-nested body that loops.
+gcc -O2 -no-pie -fno-pic -o "$T/rec2" "$T/rec.c"
+! ./rex tosource "$T/rec2" -o "$T/rec2.rex" 2> "$T/rec2.err"
+grep -q "E402: fib" "$T/rec2.err"
+test ! -f "$T/rec2.rex"
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"

@@ -93,7 +93,47 @@ int cfg_find_func(const CfgProgram *p, uint64_t addr) {
 
 static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, CfgJumpTable *jt);
 
-static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, size_t errlen) {
+/* Function symbols a jmp may tail-call: STT_FUNC entries in code, except gcc's
+ * .cold parts, which share their parent's frame and jump back into it. */
+static void seed_tail_targets(const RexElf *e, AddrList *out) {
+    for (int si = 0; si < e->nsh; si++) {
+        const RexShdr *s = &e->sh[si];
+        if (s->type != 2 && s->type != 11) continue;
+        if (s->size == 0 || s->size % 24) continue;
+        const char *want = s->type == 11 ? ".dynstr" : ".strtab";
+        int str = -1;
+        for (int j = 0; j < e->nsh; j++)
+            if (e->sh[j].type == 3 && !strcmp(e->sh[j].name, want)) { str = j; break; }
+        if (str < 0) continue;
+        const RexShdr *st = &e->sh[str];
+        for (uint64_t off = 0; off + 24 <= s->size; off += 24) {
+            const unsigned char *sym = e->data + s->offset + off;
+            uint32_t name = (uint32_t)sym[0] | (uint32_t)sym[1]<<8 | (uint32_t)sym[2]<<16 | (uint32_t)sym[3]<<24;
+            uint64_t val = 0; for (int k = 0; k < 8; k++) val |= (uint64_t)sym[8+k] << (8*k);
+            if ((sym[4] & 0xf) != 2 || !val || name >= st->size) continue;
+            const char *nm = (const char *)(e->data + st->offset + name);
+            size_t left = st->size - name, k = 0;
+            int cold = 0;
+            while (k < left && nm[k]) { if (k + 5 <= left && !strncmp(nm + k, ".cold", 5)) cold = 1; k++; }
+            if (cold || !rex_elf_code_at(e, val, NULL)) continue;
+            al_push(out, val);
+        }
+    }
+}
+
+static int tail_target(const RexElf *e, const AddrList *ft, uint64_t t, uint64_t self) {
+    if (t == self) return 0;
+    if (rex_elf_import_at(e, t)) return 1;          /* jmp puts@plt */
+    for (int i = 0; ft && i < ft->n; i++) if (ft->v[i] == t) return 1;
+    return 0;
+}
+
+int cfg_is_tail(const CfgFunc *f, uint64_t insn_addr) {
+    for (int i = 0; i < f->ntails; i++) if (f->tails[i] == insn_addr) return 1;
+    return 0;
+}
+
+static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrList *ft, char *err, size_t errlen) {
     Map seen = {0};
     AddrList work = {0}, leaders = {0};
     X86Insn *ins = NULL;
@@ -146,6 +186,15 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
                     f->jt = nj; f->jt[f->njt++] = jt;
                     for (int k = 0; k < jt.n; k++)
                         if (al_push(&work, jt.targets[k]) || al_push(&leaders, jt.targets[k])) goto oom;
+                    break;
+                }
+                /* jmp to another function's entry is a tail call: the block ends
+                 * here and the target stays a function of its own. */
+                if (tail_target(e, ft, in->ops[0].target, f->addr)) {
+                    uint64_t *nt = realloc(f->tails, (size_t)(f->ntails + 1) * sizeof(*nt));
+                    if (!nt) goto oom;
+                    f->tails = nt; f->tails[f->ntails++] = in->addr;
+                    if (!rex_elf_import_at(e, in->ops[0].target) && al_push(calls, in->ops[0].target)) goto oom;
                     break;
                 }
                 if (al_push(&work, in->ops[0].target) || al_push(&leaders, in->ops[0].target)) goto oom;
@@ -223,6 +272,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
         bl->nsucc = 0;
         if (last->op == X86_RET || last->op == X86_HLT || last->op == X86_UD2) continue;
         if (last->op == X86_JMP && last->ops[0].kind != XO_REL) continue; /* indirect: unknown targets */
+        if (last->op == X86_JMP && cfg_is_tail(f, last->addr)) continue;   /* tail call: returns for us */
         if (pl && cfg_is_exit(pl, last)) { bl->exits = 1; continue; }
         if (last->op == X86_JMP || last->op == X86_JCC) {
             int t = cfg_find_block(f, last->ops[0].target);
@@ -316,7 +366,7 @@ static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, i
 }
 
 static void cfg_func_free(CfgFunc *f) {
-    free(f->insns); free(f->blocks);
+    free(f->insns); free(f->blocks); free(f->tails);
     for (int k = 0; k < f->njt; k++) free(f->jt[k].targets);
     free(f->jt);
     memset(f, 0, sizeof(*f));
@@ -358,23 +408,24 @@ static void seed_symbols(const RexElf *e, AddrList *calls) {
 
 int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
     memset(p, 0, sizeof(*p));
-    AddrList calls = {0};
+    AddrList calls = {0}, ft = {0};
     if (al_push(&calls, e->entry)) return fail(err, errlen, "out of memory");
+    seed_tail_targets(e, &ft);
     p->funcs = calloc(CFG_MAX_FUNCS, sizeof(CfgFunc));
-    if (!p->funcs) { free(calls.v); return fail(err, errlen, "out of memory"); }
+    if (!p->funcs) { free(calls.v); free(ft.v); return fail(err, errlen, "out of memory"); }
     /* Phase 1: everything reachable from the entry through direct calls and
      * jump tables. A failure here is fatal — this code really runs. */
     for (int ci = 0; ci < calls.n; ci++) {
         uint64_t a = calls.v[ci];
         if (cfg_find_func(p, a) >= 0) continue;
-        if (p->nfuncs >= CFG_MAX_FUNCS) { cfg_free(p); free(calls.v); return fail(err, errlen, "too many functions"); }
+        if (p->nfuncs >= CFG_MAX_FUNCS) { cfg_free(p); free(calls.v); free(ft.v); return fail(err, errlen, "too many functions"); }
         CfgFunc *f = &p->funcs[p->nfuncs];
         memset(f, 0, sizeof(*f));
         f->addr = a;
         f->reachable = 1;
         if (a == e->entry) snprintf(f->name, sizeof(f->name), "start");
         else snprintf(f->name, sizeof(f->name), "fn_%llx", (unsigned long long)a);
-        if (build_func(e, f, &calls, err, errlen)) { cfg_func_free(f); cfg_free(p); free(calls.v); return -1; }
+        if (build_func(e, f, &calls, &ft, err, errlen)) { cfg_func_free(f); cfg_free(p); free(calls.v); free(ft.v); return -1; }
         p->nfuncs++;
         if (a == e->entry) {
             for (int i = 0; i < f->ninsns; i++)
@@ -399,7 +450,7 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
         f->reachable = 0;
         snprintf(f->name, sizeof(f->name), "fn_%llx", (unsigned long long)a);
         char tmperr[256];
-        if (build_func(e, f, &syms, tmperr, sizeof(tmperr))) { cfg_func_free(f); continue; }
+        if (build_func(e, f, &syms, &ft, tmperr, sizeof(tmperr))) { cfg_func_free(f); continue; }
         p->nfuncs++;
     }
     free(syms.v);
@@ -438,5 +489,6 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
         }
     }
     free(calls.v);
+    free(ft.v);
     return 0;
 }

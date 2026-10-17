@@ -370,6 +370,14 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
             l->flags = FL_NONE;
             break;
         }
+        if (cfg_is_tail(l->cf, in->addr)) {
+            /* tail call: call the target, then return what it returned */
+            i = emit(l, IR_CALL); i->a = ir_abs(in->ops[0].target);
+            i->b = ir_imm((int64_t)(in->addr + (uint64_t)in->size), 8);
+            l->flags = FL_NONE;
+            emit(l, IR_RET);
+            break;
+        }
         int t = cfg_find_block(l->cf, in->ops[0].target);
         if (t < 0) { lfail(l, "jump target not in function"); break; }
         i = emit(l, IR_JMP); i->a = ir_blk(t);
