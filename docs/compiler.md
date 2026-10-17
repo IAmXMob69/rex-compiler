@@ -181,7 +181,7 @@ gcc/clang (non-REX) binaries:
 
 ## x86-64 decoder / lift roadmap
 
-Present today (decoder + lift unless noted): the REX emission set, unsigned `div` (32/64-bit), plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32`, `leave`, `hlt`/`ud2`, `cmovcc` (IR_CMOV), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate, `setcc`, `cqo`/`cltd`, 32-bit `idiv`, shifts by imm and by `%cl`, and non-PIE jump tables in the CFG.
+Present today (decoder + lift unless noted): the REX emission set, unsigned `div` (32/64-bit), plus `nop` variants (`90`, `0f 1f /0`, `66`/`2e`/`3e`-prefixed nops), `endbr64`/`endbr32`, `leave`, `hlt`/`ud2`, `cmovcc` (IR_CMOV), `movzx`/`movsx` (0f b6/b7/be/bf), `test` r/m with register or immediate, `setcc`, `cqo`/`cltd`, 32-bit `idiv`, shifts by imm and by `%cl`, and non-PIE jump tables in the CFG. SSE moves and the xor-self zero idiom (movaps/movups/movdqa/movdqu, movq low-8, movd/movq to and from a GPR, xorps/pxor) are decoded and recovered; packed arithmetic (paddd, psubd, pshufd, punpck*, pcmp*, psrlq, ...) is not, and still refuses with E200.
 
 Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` output:
 
@@ -191,7 +191,7 @@ Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` outpu
 5. `bt` / `bts` / `btr` / `btc`, `xchg`, `cmpxchg`, `xadd`.
 6. General rip-relative memory in more ops; PIC/PLT call shapes.
 7. Done: non-PIE jump tables (`jmp *T(,r,8)` after `cmp`/`ja`, and clang -O0's load-then-`jmp *reg`).
-8. SSE/AVX moves used as GPR spills (`movdqa`/`movaps` to stack).
+8. SSE packed arithmetic (paddd/psubd/pshufd/punpck*/pcmp*/psrlq) for auto-vectorized gcc/clang `-O2` mains; the move/zero subset is already handled.
 
 ## Roadmap (tool)
 
