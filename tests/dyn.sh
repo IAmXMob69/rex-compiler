@@ -103,6 +103,12 @@ printf '%s\n' 'int main(int c, char **v){unsigned long s=(unsigned long)c*977;re
 gcc -O1 -no-pie -fno-pic -o "$T/um" "$T/um.c"
 set +e; ./rex tosource "$T/um" -o "$T/um.rex" 2> "$T/um.err"; rc=$?; set -e
 test $rc -ne 0 && grep -q "E200" "$T/um.err" && test ! -s "$T/um.rex" -o ! -e "$T/um.rex"
+# match runs each program for at most 20 s: an original that never finishes
+# is reported in one line instead of hanging match
+printf '%s\n' 'volatile int z;' 'int main(void){ while (!z) ; return 0; }' > "$T/spin.c"
+gcc -O1 -no-pie -fno-pic -o "$T/spin" "$T/spin.c"
+set +e; ./rex match "$T/spin" -o "$T/spin.rex" 2> "$T/spin.err"; rc=$?; set -e
+test $rc -ne 0 && grep -q "did not finish in 20 s" "$T/spin.err"
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"

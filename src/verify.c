@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "rex_err.h"
@@ -11,6 +12,8 @@
 #include "x86_lift.h"
 #include "ir.h"
 
+/* Each program gets this long: a rebuilt program that loops must not hang match. */
+enum { RUN_LIMIT_S = 20, RUN_TIMEOUT = -2 };
 static int run_capture(const char *bin, char *out, size_t outn, int *status) {
     int p[2];
     if (pipe(p)) return -1;
@@ -18,6 +21,7 @@ static int run_capture(const char *bin, char *out, size_t outn, int *status) {
     if (pid < 0) { close(p[0]); close(p[1]); return -1; }
     if (pid == 0) {
         dup2(p[1], 1); dup2(p[1], 2); close(p[0]); close(p[1]);
+        alarm(RUN_LIMIT_S);                 /* a pending alarm survives exec */
         execl(bin, bin, (char *)NULL);
         _exit(127);
     }
@@ -32,15 +36,21 @@ static int run_capture(const char *bin, char *out, size_t outn, int *status) {
     out[n] = 0;
     close(p[0]);
     int st = 0; waitpid(pid, &st, 0);
-    *status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    *status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) && WTERMSIG(st) == SIGALRM ? RUN_TIMEOUT : -1;
     return 0;
 }
 
 int rex_verify_bins(const char *a, const char *b, char *err, size_t errlen, int code) {
     char oa[1 << 16], ob[1 << 16];
     int sa, sb;
-    if (run_capture(a, oa, sizeof(oa), &sa) || run_capture(b, ob, sizeof(ob), &sb))
+    if (run_capture(a, oa, sizeof(oa), &sa))
         return rex_errf(err, errlen, code, "could not run binaries");
+    if (sa == RUN_TIMEOUT)
+        return rex_errf(err, errlen, code, "the original did not finish in %d s, so there is nothing to compare", RUN_LIMIT_S);
+    if (run_capture(b, ob, sizeof(ob), &sb))
+        return rex_errf(err, errlen, code, "could not run binaries");
+    if (sb == RUN_TIMEOUT)
+        return rex_errf(err, errlen, code, "the rebuilt program did not finish in %d s (the original exits %d)", RUN_LIMIT_S, sa);
     if (sa != sb)
         return rex_errf(err, errlen, code, "exit %d vs %d", sa, sb);
     if (strcmp(oa, ob))
