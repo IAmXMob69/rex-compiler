@@ -25,6 +25,10 @@ grep -q 'let g_' "$T/r.rex"
 if command -v clang >/dev/null 2>&1; then
     build clang O1 rng
     ./rex match "$T/rng_clang_O1" -o "$T/rc.rex" >/dev/null
+    # clang -O2 ends the loop with "add $-2,%eax; jne": the flag compare must be
+    # against -imm (reg != 2), not the raw immediate, or the loop never ends.
+    build clang O2 rng
+    ./rex match "$T/rng_clang_O2" -o "$T/rc2.rex" >/dev/null
     build clang O1 collide
     ./rex match "$T/collide_clang_O1" -o "$T/c.rex" >/dev/null
     # clang -O2 pulls in an SSE memcpy/memset the linker never calls; that dead

@@ -179,9 +179,17 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         if ((in->op == X86_ADD || in->op == X86_SUB) && !last_in_block) {
             const X86Insn *nx = l->in + 1;
             if (nx->op == X86_JCC || nx->op == X86_SETCC || nx->op == X86_CMOVCC) {
-                i = emit(l, IR_CMP); i->a = d; i->b = s;
-                l->flags = FL_CMP;
-                own_cmp = 1;
+                /* add/sub set flags from the result. sub reg,x matches cmp reg,x
+                 * (reg - x); add reg,imm matches cmp reg,-imm (reg - (-imm)).
+                 * add of a register has no cmp form here, so leave its flags as
+                 * a result-vs-0 comparison instead. */
+                if (in->op == X86_SUB) {
+                    i = emit(l, IR_CMP); i->a = d; i->b = s;
+                    l->flags = FL_CMP; own_cmp = 1;
+                } else if (s.kind == IR_O_IMM) {
+                    i = emit(l, IR_CMP); i->a = d; i->b = ir_imm(-s.imm, s.width);
+                    l->flags = FL_CMP; own_cmp = 1;
+                }
             }
         }
         wrote(l, d);
