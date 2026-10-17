@@ -154,12 +154,14 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, char *err, s
             if (in->op == X86_JCC) {
                 if (al_push(&work, in->ops[0].target) || al_push(&leaders, in->ops[0].target) || al_push(&leaders, next)) goto oom;
             }
-            if (in->op == X86_CALL && in->ops[0].kind == XO_REL && al_push(calls, in->ops[0].target)) goto oom;
+            /* A call to a PLT stub is a library call (puts, printf), not a function of ours. */
+            if (in->op == X86_CALL && in->ops[0].kind == XO_REL && !rex_elf_import_at(e, in->ops[0].target) &&
+                al_push(calls, in->ops[0].target)) goto oom;
             if ((in->op == X86_LEA || in->op == X86_MOV) && in->nops >= 2) {
                 const X86Operand *so = &in->ops[1];
                 uint64_t t = 0;
                 if (so->kind == XO_MEM && so->base == X86_RIP) t = so->target;
-                if (t) {
+                if (t && !rex_elf_import_at(e, t)) {
                     size_t av = 0;
                     const unsigned char *p = rex_elf_code_at(e, t, &av);
                     if (p && av >= 1 && (p[0] == 0x55 || (av >= 4 && p[0] == 0xf3 && p[1] == 0x0f))) {
@@ -376,7 +378,8 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
         p->nfuncs++;
         if (a == e->entry) {
             for (int i = 0; i < f->ninsns; i++)
-                if (f->insns[i].op == X86_CALL && f->insns[i].ops[0].kind == XO_REL) { p->main_addr = f->insns[i].ops[0].target; break; }
+                if (f->insns[i].op == X86_CALL && f->insns[i].ops[0].kind == XO_REL &&
+                    !rex_elf_import_at(e, f->insns[i].ops[0].target)) { p->main_addr = f->insns[i].ops[0].target; break; }
         }
     }
     /* Phase 2: functions named only by the symbol table and not reached above

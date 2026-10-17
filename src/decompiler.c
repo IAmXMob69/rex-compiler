@@ -174,6 +174,7 @@ typedef struct {
     int kind;       /* 0 user, 1 start, 2 main, 3 runtime */
     const char *builtin; /* print/putc/alloc/free/... */
     unsigned clob;  /* caller-saved registers this function may modify (transitively) */
+    int reach;      /* reached from main by a call or a taken address */
 } Fun;
 
 typedef struct {
@@ -438,6 +439,10 @@ static void blob_range(D *d) {
         const RexShdr *s = &d->elf->sh[i];
         if (!(s->flags & 2) || (s->flags & 4) || s->addr < 0x1000 || !s->size) continue;
         if (!(s->flags & 1) && strncmp(s->name, ".rodata", 7)) continue;  /* data, bss, rodata only */
+        /* A dynamically linked program's loader tables are not its data. */
+        if (d->elf->dynamic && (!strcmp(s->name, ".dynamic") || !strcmp(s->name, ".got") || !strcmp(s->name, ".got.plt") ||
+            !strcmp(s->name, ".init_array") || !strcmp(s->name, ".fini_array") ||
+            !strcmp(s->name, ".preinit_array") || !strcmp(s->name, ".tm_clone_table"))) continue;
         if (s->addr < d->blo) d->blo = s->addr;
         if (s->addr + s->size > d->bhi) d->bhi = s->addr + s->size;
     }
@@ -455,6 +460,7 @@ static void blob_scan(D *d) {
     for (int fi = 0; fi < d->m->nfuncs && !d->blob; fi++) {
         const IrFunc *f = &d->m->funcs[fi];
         if (!strcmp(f->name, "start") || !strcmp(f->name, "_start")) continue;
+        if (d->elf && d->elf->dynamic && d->fun[fi].kind == 1) continue;   /* C runtime helpers: not emitted */
         for (int b = 0; b < f->nblocks && !d->blob; b++)
             for (int k = 0; k < f->blocks[b].ninsns; k++) {
                 const IrInsn *in = &f->blocks[b].insns[k];
@@ -657,6 +663,23 @@ static void classify(D *d) {
         const IrFunc *f = &d->m->funcs[i];
         fi->addr = f->addr;
         if (!strcmp(f->name, "start")) { fi->kind = 1; snprintf(fi->name, sizeof(fi->name), "start"); continue; }
+        /* In a dynamically linked program the entry is the C runtime's _start,
+         * which only hands main to __libc_start_main: the start stub, not code
+         * of the program's own. */
+        if (d->elf && d->elf->dynamic && f->addr == d->elf->entry && f->addr != d->cfg->main_addr) {
+            fi->kind = 1; snprintf(fi->name, sizeof(fi->name), "start"); continue;
+        }
+        /* The C runtime's own helpers in such a program: never called by the
+         * program's code, so they are not part of its source. Matched by
+         * symbol name only, so nothing the program defines is ever hidden. */
+        if (d->elf && d->elf->dynamic && f->addr != d->cfg->main_addr) {
+            static const char *crt[] = { "_init", "_fini", "deregister_tm_clones", "register_tm_clones",
+                "__do_global_dtors_aux", "frame_dummy", "_dl_relocate_static_pie", "__libc_csu_init",
+                "__libc_csu_fini" };
+            int is_crt = 0;
+            for (size_t c = 0; c < sizeof crt / sizeof crt[0]; c++) if (!strcmp(f->name, crt[c])) is_crt = 1;
+            if (is_crt) { fi->kind = 1; snprintf(fi->name, sizeof(fi->name), "%.31s", f->name); continue; }
+        }
         if (f->addr == d->cfg->main_addr) { fi->kind = 2; snprintf(fi->name, sizeof(fi->name), "main"); }
         else snprintf(fi->name, sizeof(fi->name), "f%d", i);
 
@@ -993,6 +1016,76 @@ static void vec_op(D *d, const IrInsn *in) {
     }
 }
 
+/* Functions main can reach: direct calls, and any function whose address
+ * appears as an operand (a callback). Without a main every function counts. */
+static void compute_reach(D *d) {
+    int has_main = 0;
+    for (int i = 0; i < d->nfun; i++) { d->fun[i].reach = d->fun[i].kind == 2; has_main |= d->fun[i].reach; }
+    if (!has_main) { for (int i = 0; i < d->nfun; i++) d->fun[i].reach = 1; return; }
+    for (int changed = 1; changed; ) {
+        changed = 0;
+        for (int i = 0; i < d->nfun; i++) {
+            if (!d->fun[i].reach) continue;
+            const IrFunc *f = &d->m->funcs[i];
+            for (int b = 0; b < f->nblocks; b++)
+                for (int k = 0; k < f->blocks[b].ninsns; k++) {
+                    const IrInsn *in = &f->blocks[b].insns[k];
+                    const IrOperand *op[3] = { &in->dst, &in->a, &in->b };
+                    for (int o = 0; o < 3; o++) {
+                        uint64_t v;
+                        if (op[o]->kind == IR_O_ADDR) v = op[o]->addr;
+                        else if (op[o]->kind == IR_O_IMM) v = (uint64_t)op[o]->imm;
+                        else continue;
+                        Fun *t = fby(d, v);
+                        if (t && !t->reach) { t->reach = 1; changed = 1; }
+                    }
+                }
+        }
+    }
+}
+
+/* Library calls (puts, printf) reached through the PLT or a GOT slot. Counted
+ * so match can refuse: the rebuilt program has no libc to call into. */
+static int g_libcalls;
+static char g_libname[48];
+
+int rex_decompile_libcalls(char *name, size_t n) {
+    if (g_libcalls && name && n) snprintf(name, n, "%s", g_libname);
+    return g_libcalls;
+}
+
+/* Arguments of a library call. Known functions take a fixed count; a variadic
+ * one (printf) takes its fixed part plus every further argument register set
+ * right before the call; an unknown one takes the registers set there. */
+static int lib_arity(D *d, const char *nm, int *is_void) {
+    static const struct { const char *n; signed char a; char v; } T[] = {
+        {"abort",0,1},{"rand",0,0},{"getchar",0,0},{"getpid",0,0},{"__stack_chk_fail",0,1},
+        {"puts",1,0},{"strlen",1,0},{"malloc",1,0},{"free",1,1},{"exit",1,1},{"_exit",1,1},
+        {"putchar",1,0},{"atoi",1,0},{"atol",1,0},{"abs",1,0},{"labs",1,0},{"strdup",1,0},
+        {"close",1,0},{"srand",1,1},{"time",1,0},{"getenv",1,0},{"system",1,0},{"perror",1,1},
+        {"fflush",1,0},{"fclose",1,0},{"sleep",1,0},{"usleep",1,0},{"isalpha",1,0},
+        {"isdigit",1,0},{"isspace",1,0},{"toupper",1,0},{"tolower",1,0},
+        {"strcpy",2,0},{"strcmp",2,0},{"strcat",2,0},{"strchr",2,0},{"strrchr",2,0},
+        {"strstr",2,0},{"fopen",2,0},{"fputs",2,0},{"calloc",2,0},{"realloc",2,0},
+        {"fputc",2,0},{"putc",2,0},{"strtok",2,0},{"signal",2,0},
+        {"memcpy",3,0},{"memmove",3,0},{"memset",3,0},{"memcmp",3,0},{"strncpy",3,0},
+        {"strncmp",3,0},{"strncat",3,0},{"read",3,0},{"write",3,0},{"strtol",3,0},
+        {"strtoul",3,0},{"fwrite",4,0},{"fread",4,0},{"qsort",4,1},{"setvbuf",4,0},
+        /* variadic: negative = fixed part */
+        {"printf",-1,0},{"scanf",-1,0},{"fprintf",-2,0},{"sprintf",-2,0},{"dprintf",-2,0},
+        {"sscanf",-2,0},{"fscanf",-2,0},{"open",-2,0},{"snprintf",-3,0},
+    };
+    *is_void = 0;
+    int fixed = -1, var = 1;
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; i++)
+        if (!strcmp(T[i].n, nm)) { *is_void = T[i].v; fixed = T[i].a < 0 ? -T[i].a : T[i].a; var = T[i].a < 0; break; }
+    if (!var) return fixed;
+    int n = fixed < 0 ? 0 : fixed;
+    while (n < 6 && d->has[ARG[n]]) n++;
+    return n;
+}
+
+
 static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     d->depth = depth;
     if (is_prolog(in) || is_epilog(in)) return;
@@ -1110,8 +1203,19 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     case IR_CALL: {
         Fun *t = in->a.kind == IR_O_ADDR ? fby(d, in->a.addr) : NULL;
         const char *nm = "fn";
-        int na = 0;
-        if (t) {
+        int na = 0, lib_void = 0;
+        const char *imp = NULL;
+        if (!t && d->elf) {
+            if (in->a.kind == IR_O_ADDR) imp = rex_elf_import_at(d->elf, in->a.addr);
+            else if (in->a.kind == IR_O_MEM && in->a.base == IR_NOREG && in->a.index == IR_NOREG)
+                imp = rex_elf_import_got(d->elf, (uint64_t)in->a.disp);
+        }
+        if (imp) {
+            nm = imp;
+            na = lib_arity(d, imp, &lib_void);
+            if (!d->cur || d->cur->reach)
+                if (!g_libcalls++) snprintf(g_libname, sizeof g_libname, "%s", imp);
+        } else if (t) {
             if (t->kind == 3 && t->builtin) {
                 nm = t->builtin;
                 if (!strcmp(nm, "read")) na = 0;
@@ -1156,7 +1260,7 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             if (emit_call) *emit_call = 0;
             break;
         }
-        if ((!t && in->a.kind == IR_O_ADDR) || (t && t->kind == 3 && t->builtin &&
+        if ((!t && !imp && in->a.kind == IR_O_ADDR) || (t && t->kind == 3 && t->builtin &&
             strcmp(t->builtin, "print") && strcmp(t->builtin, "putc") &&
             strcmp(t->builtin, "alloc") && strcmp(t->builtin, "free") &&
             strcmp(t->builtin, "len") && strcmp(t->builtin, "exec") &&
@@ -1184,7 +1288,8 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
                 emit(d, depth, "x%d = %s;", k, bare(d->reg[r].s, bb2, sizeof bb2));
                 ex_free(d->reg[r]); d->reg[r] = exf("x%d", k);
             }
-            emit(d, depth, "v0 = %s;", call.s);
+            if (lib_void) emit(d, depth, "%s;", call.s);
+            else emit(d, depth, "v0 = %s;", call.s);
             ex_free(call);
             /* Clobber only what the callee may write; a known function that
              * never touches a caller-saved register leaves the caller's value
@@ -2692,6 +2797,8 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
 
 
     g_struct_fail = 0; g_struct_fail_fn = NULL;
+    g_libcalls = 0; g_libname[0] = 0;
+    compute_reach(&d);
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 0) decompile_fun(&d, &d.fun[i]);
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 2) decompile_fun(&d, &d.fun[i]);
     if (g_struct_fail) {
