@@ -882,6 +882,8 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
             }
             if (done[fi]) continue;
             done[fi] = 1;
+            /* it runs: a lift that fails on it is an error, not a dropped helper */
+            p->funcs[fi].reachable = 1;
             if (p->funcs[fi].lenient) {
                 /* built leniently as a helper, but main reaches it: build it as code that runs */
                 CfgFunc tf; memset(&tf, 0, sizeof tf);

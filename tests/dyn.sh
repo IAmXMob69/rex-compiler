@@ -206,6 +206,13 @@ for cc in gcc clang; do for o in O0 O2; do
     $cc -$o -pie -fpie -o "$T/sw2" "$T/sw2.c"
     ./rex match "$T/sw2" -o "$T/sw2.rex" >/dev/null 2>&1
 done; done
+# a function main reaches is code that runs: one REX can't lift is an error,
+# never left out of the source (a non-PIE _start passes main in rdi)
+printf '%s\n' '__attribute__((noinline)) int mb(unsigned char a, unsigned char b){ unsigned short r; __asm__("mov %1, %%al; mulb %2; mov %%ax, %0" : "=r"(r) : "r"(a), "r"(b) : "ax", "cc"); return r; }' \
+    'int main(void){ volatile int x = 13; return mb(x, 11) & 255; }' > "$T/drop.c"
+gcc -O2 -no-pie -fno-pic -o "$T/drop" "$T/drop.c"
+set +e; ./rex tosource "$T/drop" -o "$T/drop.rex" 2> "$T/drop.err"; rc=$?; set -e
+test $rc -ne 0 && grep -q "E300: mb at 0x[0-9a-f]*: 8-bit one-operand mul" "$T/drop.err"
 # a table whose bounds check another path skips is refused (tests/jt/skip.s);
 # the same code without the skip matches
 gcc -pie -o "$T/skip" tests/jt/skip.s
