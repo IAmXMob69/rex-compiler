@@ -313,12 +313,15 @@ static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, i
     return 0;
 }
 
+static void cfg_func_free(CfgFunc *f) {
+    free(f->insns); free(f->blocks);
+    for (int k = 0; k < f->njt; k++) free(f->jt[k].targets);
+    free(f->jt);
+    memset(f, 0, sizeof(*f));
+}
+
 void cfg_free(CfgProgram *p) {
-    for (int i = 0; i < p->nfuncs; i++) {
-        free(p->funcs[i].insns); free(p->funcs[i].blocks);
-        for (int k = 0; k < p->funcs[i].njt; k++) free(p->funcs[i].jt[k].targets);
-        free(p->funcs[i].jt);
-    }
+    for (int i = 0; i < p->nfuncs; i++) cfg_func_free(&p->funcs[i]);
     free(p->funcs);
     memset(p, 0, sizeof(*p));
 }
@@ -355,23 +358,46 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
     memset(p, 0, sizeof(*p));
     AddrList calls = {0};
     if (al_push(&calls, e->entry)) return fail(err, errlen, "out of memory");
-    seed_symbols(e, &calls);
     p->funcs = calloc(CFG_MAX_FUNCS, sizeof(CfgFunc));
     if (!p->funcs) { free(calls.v); return fail(err, errlen, "out of memory"); }
+    /* Phase 1: everything reachable from the entry through direct calls and
+     * jump tables. A failure here is fatal — this code really runs. */
     for (int ci = 0; ci < calls.n; ci++) {
         uint64_t a = calls.v[ci];
         if (cfg_find_func(p, a) >= 0) continue;
         if (p->nfuncs >= CFG_MAX_FUNCS) { cfg_free(p); free(calls.v); return fail(err, errlen, "too many functions"); }
-        CfgFunc *f = &p->funcs[p->nfuncs++];
+        CfgFunc *f = &p->funcs[p->nfuncs];
+        memset(f, 0, sizeof(*f));
         f->addr = a;
         if (a == e->entry) snprintf(f->name, sizeof(f->name), "start");
         else snprintf(f->name, sizeof(f->name), "fn_%llx", (unsigned long long)a);
-        if (build_func(e, f, &calls, err, errlen)) { cfg_free(p); free(calls.v); return -1; }
+        if (build_func(e, f, &calls, err, errlen)) { cfg_func_free(f); cfg_free(p); free(calls.v); return -1; }
+        p->nfuncs++;
         if (a == e->entry) {
             for (int i = 0; i < f->ninsns; i++)
                 if (f->insns[i].op == X86_CALL && f->insns[i].ops[0].kind == XO_REL) { p->main_addr = f->insns[i].ops[0].target; break; }
         }
     }
+    /* Phase 2: functions named only by the symbol table and not reached above
+     * (library helpers like memcpy the linker pulled in). Build them so their
+     * names and bodies are available, but if one uses something we can't model
+     * yet, drop just that function instead of failing the whole program —
+     * nothing reachable calls it. */
+    AddrList syms = {0};
+    seed_symbols(e, &syms);
+    for (int si = 0; si < syms.n; si++) {
+        uint64_t a = syms.v[si];
+        if (cfg_find_func(p, a) >= 0) continue;
+        if (p->nfuncs >= CFG_MAX_FUNCS) break;
+        CfgFunc *f = &p->funcs[p->nfuncs];
+        memset(f, 0, sizeof(*f));
+        f->addr = a;
+        snprintf(f->name, sizeof(f->name), "fn_%llx", (unsigned long long)a);
+        char tmperr[256];
+        if (build_func(e, f, &syms, tmperr, sizeof(tmperr))) { cfg_func_free(f); continue; }
+        p->nfuncs++;
+    }
+    free(syms.v);
     /* Name functions from symbols; set main_addr if main is present. */
     for (int si = 0; si < e->nsh; si++) {
         const RexShdr *sec = &e->sh[si];

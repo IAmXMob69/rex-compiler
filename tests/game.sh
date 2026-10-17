@@ -27,6 +27,10 @@ if command -v clang >/dev/null 2>&1; then
     ./rex match "$T/rng_clang_O1" -o "$T/rc.rex" >/dev/null
     build clang O1 collide
     ./rex match "$T/collide_clang_O1" -o "$T/c.rex" >/dev/null
+    # clang -O2 pulls in an SSE memcpy/memset the linker never calls; that dead
+    # library function is dropped instead of failing the whole program.
+    build clang O2 collide
+    ./rex match "$T/collide_clang_O2" -o "$T/c2.rex" >/dev/null
     # clang -O0: memory operands on imul/add/cmp and movslq from memory
     for s in tilemap statemachine entities; do
         build clang O0 $s
