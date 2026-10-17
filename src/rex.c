@@ -2512,6 +2512,7 @@ int rex_recompile(const char *in, const char *out, int debug);
 int rex_decompile(const char *in, const char *out, int verbose);
 int rex_decompile_libcalls(char *name, size_t n);
 int rex_decompile_fpcalls(char *why, size_t n);
+int rex_decompile_bigblock(char *why, size_t n);
 
 static int compile_to(const char *srcpath, const char *outbin);
 
@@ -2586,6 +2587,17 @@ static int refuse_fpcalls(const char *out) {
     rex_errf(err, sizeof err, REX_E605_FPCALL, "%s; the source is in %s", why, out);
     rex_refuse(err);
     return REX_E605_FPCALL;
+}
+
+/* A frame or data block bigger than one REX alloc would crash the rebuild:
+ * refuse with E606 before building. */
+static int refuse_bigblock(const char *out) {
+    char why[160];
+    if (!rex_decompile_bigblock(why, sizeof why)) return 0;
+    char err[512];
+    rex_errf(err, sizeof err, REX_E606_BIGBLOCK, "%s; the source is in %s", why, out);
+    rex_refuse(err);
+    return REX_E606_BIGBLOCK;
 }
 
 static const char *alias_cmd(const char *c) {
@@ -2670,6 +2682,7 @@ int main(int argc, char **argv) {
         if (rc) return rc;
         if ((rc = refuse_libcalls(out))) return rc;
         if ((rc = refuse_fpcalls(out))) return rc;
+        if ((rc = refuse_bigblock(out))) return rc;
         char tmp[] = "/tmp/rexverXXXXXX";
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
         if ((rc = compile_recovered(out, tmp))) { unlink(tmp); return rc; }
@@ -2710,6 +2723,7 @@ int main(int argc, char **argv) {
         if (rc || !verify) return rc;
         if ((rc = refuse_libcalls(out))) return rc;
         if ((rc = refuse_fpcalls(out))) return rc;
+        if ((rc = refuse_bigblock(out))) return rc;
         /* Rebuild decompiled source and compare behavior to the original. */
         char tmp[] = "/tmp/rexverXXXXXX";
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);

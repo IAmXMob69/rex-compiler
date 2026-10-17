@@ -177,6 +177,7 @@ typedef struct {
     int reach;      /* reached from main by a call or a taken address */
     int shape;      /* kind 3 by the shape of a REX string helper, not by a syscall */
     int taken;      /* its address is a value (operand or pointer in data): a callp target */
+    int slots_full; /* a stack slot found no room in slots[] */
 } Fun;
 
 typedef struct {
@@ -206,6 +207,7 @@ typedef struct {
     char callp_why[160];/* why callp cannot stand for every pointer call (match refuses, E605) */
     int need_gfr;       /* global gfr hands a new frame block to a local */
     int frame;          /* foreign: current function's stack lives in heap block fr (0 = off, else half size) */
+    int force_frame;    /* foreign: put the stack in fr even when no slot is indexed (too many names) */
     int fp;             /* foreign: rbp is a real frame pointer (mov %rsp,%rbp), not a general callee-saved register */
     int blob;           /* foreign: data sections live in one heap block gmem */
     uint64_t blo, bhi;  /* address range of that block */
@@ -425,7 +427,7 @@ static Slot *slot_at(Fun *f, int off) {
 }
 static void add_slot(Fun *f, int off, int arg) {
     for (int i = 0; i < f->nslots; i++) if (f->slots[i].off == off) return;
-    if (f->nslots >= MAX_LOC) return;
+    if (f->nslots >= MAX_LOC) { f->slots_full = 1; return; }
     Slot *s = &f->slots[f->nslots++];
     s->off = off; s->arg = arg; s->hint = 0;
     if (arg >= 0) snprintf(s->name, sizeof(s->name), "%c", 'a' + arg);
@@ -1177,6 +1179,14 @@ static void shape_reached(D *d) {
  * match refuses with E605 (the source is still written for reading). */
 static int g_fpcall;
 static char g_fpwhy[160];
+/* A block REX's alloc cannot hold: one 4 KB page, 8 bytes of it the length. */
+enum { ALLOC_MAX = 4088 };
+static int g_bigblk;
+static char g_bigwhy[160];
+int rex_decompile_bigblock(char *why, size_t n) {
+    if (g_bigblk && why && n) snprintf(why, n, "%s", g_bigwhy);
+    return g_bigblk;
+}
 int rex_decompile_fpcalls(char *why, size_t n) {
     if (g_fpcall && why && n) snprintf(why, n, "%s", g_fpwhy);
     return g_fpcall;
@@ -2609,8 +2619,8 @@ static int frame_has_fp(const IrFunc *f) {
         }
     return 0;
 }
-static int frame_size(const IrFunc *f) {
-    int need = 0;
+static int frame_size(const IrFunc *f, int force) {
+    int need = force;
     long long far = 0;
     for (int b = 0; b < f->nblocks; b++)
         for (int k = 0; k < f->blocks[b].ninsns; k++) {
@@ -2995,6 +3005,92 @@ static void emit_dispatch(D *d, const IrFunc *f, int depth) {
     free(dent);
 }
 
+/* names a printed function declares: parameters and let lines */
+static int count_names(const char *t) {
+    int n = 0;
+    const char *p = strstr(t, "fn ");
+    if (p) {
+        const char *o = strchr(p, '('), *c = o ? strchr(o, ')') : NULL;
+        if (o && c && c > o + 1) { n = 1; for (const char *q = o; q < c; q++) if (*q == ',') n++; }
+    }
+    for (const char *q = t; (q = strstr(q, "let ")); q += 4) {
+        const char *b = q;
+        while (b > t && b[-1] == ' ') b--;
+        if (b == t || b[-1] == '\n') n++;
+    }
+    return n;
+}
+
+/* Still too many names with the stack in fr: the x temporaries move into fr
+ * too, past the stack (fr + 2*frame + 8k), and the block grows to hold them.
+ * Returns a new text, or NULL when it cannot (no x temporaries, no alloc). */
+static char *temps_to_frame(const char *t, int frame) {
+    char want[48]; snprintf(want, sizeof want, "gfr = alloc(%d);", 2 * frame);
+    const char *al = strstr(t, want);
+    if (!al) return NULL;
+    int nx = 0;
+    for (const char *q = t; (q = strstr(q, "let x")); q += 5) {
+        int k; if (sscanf(q + 5, "%d", &k) == 1 && k + 1 > nx) nx = k + 1;
+    }
+    if (!nx) return NULL;
+    size_t cap = strlen(t) * 3 + 256, n = 0;
+    char *o = malloc(cap);
+    if (!o) return NULL;
+    int instr = 0;
+    for (const char *p = t; *p; ) {
+        if (p == al) { n += (size_t)snprintf(o + n, cap - n, "gfr = alloc(%d);", 2 * frame + 8 * nx); p += strlen(want); continue; }
+        if (!instr && (p == t || p[-1] == '\n')) {
+            const char *b = p; while (*b == ' ') b++;
+            int k; char tail;
+            if (sscanf(b, "let x%d = 0%c", &k, &tail) == 2 && tail == ';') {   /* drop the declaration line */
+                const char *e = strchr(b, '\n'); p = e ? e + 1 : b + strlen(b); continue;
+            }
+        }
+        if (*p == '"' && (p == t || p[-1] != '\\')) instr = !instr;
+        int id_before = p > t && ((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_');
+        if (!instr && *p == 'x' && !id_before && p[1] >= '0' && p[1] <= '9') {
+            const char *e = p + 1; int k = 0;
+            while (*e >= '0' && *e <= '9') k = k * 10 + (*e++ - '0');
+            int id_after = (*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') || *e == '_';
+            if (!id_after && k < nx) {
+                if (cap - n < 64) { cap *= 2; char *r = realloc(o, cap); if (!r) { free(o); return NULL; } o = r; }
+                n += (size_t)snprintf(o + n, cap - n, "*(fr + %d)", 2 * frame + 8 * k);
+                p = e; continue;
+            }
+        }
+        if (cap - n < 64) { cap *= 2; char *r = realloc(o, cap); if (!r) { free(o); return NULL; } o = r; }
+        o[n++] = *p++;
+    }
+    o[n] = 0;
+    /* fr is freed right before each return: a return value read from a moved
+     * temporary is taken first, into the one name kept for it (xr) */
+    size_t cap2 = strlen(o) * 2 + 256, m = 0;
+    char *r = malloc(cap2);
+    if (!r) { free(o); return NULL; }
+    for (const char *p = o; *p; ) {
+        const char *e = strchr(p, '\n'); size_t len = e ? (size_t)(e - p) + 1 : strlen(p);
+        const char *b = p; while (*b == ' ') b++;
+        const char *nx = p + len, *nb = nx; while (*nb == ' ') nb++;
+        if (!strncmp(b, "free(fr);", 9) && !strncmp(nb, "return ", 7)) {
+            const char *ne = strchr(nb, '\n'); size_t rl = ne ? (size_t)(ne - nb) : strlen(nb);
+            const char *fe = memmem(nb, rl, "*(fr + ", 7) ? nb : NULL;
+            if (fe && rl > 8 && nb[rl - 1] == ';') {
+                int ind = (int)(b - p);
+                if (cap2 - m < rl + 128) { cap2 = cap2 * 2 + rl; char *q = realloc(r, cap2); if (!q) { free(r); free(o); return NULL; } r = q; }
+                m += (size_t)snprintf(r + m, cap2 - m, "%*sxr = %.*s;\n%*sfree(fr);\n%*sreturn xr;\n", ind, "", (int)(rl - 8), nb + 7, ind, "", ind, "");
+                p = ne ? ne + 1 : nb + rl; continue;
+            }
+        }
+        if (cap2 - m < len + 64) { cap2 = cap2 * 2 + len; char *q = realloc(r, cap2); if (!q) { free(r); free(o); return NULL; } r = q; }
+        memcpy(r + m, p, len); m += len;
+        if (!strncmp(b, "let fr = gfr;", 13)) m += (size_t)snprintf(r + m, cap2 - m, "    let xr = 0;\n");
+        p += len;
+    }
+    r[m] = 0;
+    free(o);
+    return r;
+}
+
 static void decompile_fun(D *d, Fun *fi) {
     if (fi->kind == 1 || fi->kind == 3) return;
     const IrFunc *f = NULL;
@@ -3014,7 +3110,7 @@ static void decompile_fun(D *d, Fun *fi) {
     d->cur = fi;
     G g;
     d->vused = 0;
-    d->frame = d->foreign ? frame_size(f) : 0;
+    d->frame = d->foreign ? frame_size(f, d->force_frame) : 0;
     d->fp = d->foreign ? frame_has_fp(f) : 0;
     d->fixed_x = -1;
     if (g_build(d, f, &g) == 0) {
@@ -3110,8 +3206,26 @@ static void decompile_fun(D *d, Fun *fi) {
         fclose(dt_m);
         d->out = dt_real;
         char *clean = strip_dead_temps(dt_buf);
-        fputs(clean ? clean : dt_buf, d->out);
-        free(clean); free(dt_buf);
+        const char *txt = clean ? clean : dt_buf;
+        /* REX gives a function at most 64 names. When the stack slots (with the
+         * register and temporary names) do not fit, or a slot found no room,
+         * print the function again with its stack in the frame block fr: slots
+         * become fr offsets and need no names. */
+        if (d->foreign && !d->frame && !d->force_frame && (fi->slots_full || count_names(txt) > 64)) {
+            free(clean); free(dt_buf);
+            d->force_frame = 1;
+            decompile_fun(d, fi);
+            d->force_frame = 0;
+            return;
+        }
+        char *moved = NULL;
+        if (d->foreign && d->frame && count_names(txt) > 64) moved = temps_to_frame(txt, d->frame);
+        const char *fin = moved ? moved : txt, *al = strstr(fin, "gfr = alloc(");
+        long need = al ? strtol(al + 12, NULL, 10) : 0;
+        if (need > ALLOC_MAX && fi->reach && !g_bigblk++)
+            snprintf(g_bigwhy, sizeof g_bigwhy, "%s: its stack needs %ld bytes, more than the %d one .rex block holds", fi->name, need, ALLOC_MAX);
+        fputs(fin, d->out);
+        free(moved); free(clean); free(dt_buf);
     }
 }
 
@@ -3158,7 +3272,7 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     compute_reach(&d);
     if (d.foreign) shape_reached(&d);
     if (d.foreign) compute_taken(&d);
-    g_fpcall = 0; g_fpwhy[0] = 0;
+    g_fpcall = 0; g_fpwhy[0] = 0; g_bigblk = 0; g_bigwhy[0] = 0;
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 0) decompile_fun(&d, &d.fun[i]);
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 2) decompile_fun(&d, &d.fun[i]);
     if (g_struct_fail) {
@@ -3251,7 +3365,10 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     if (d.blob) {
         fprintf(out, "let gmem = 0; // data sections 0x%llx..0x%llx\n\n", (unsigned long long)d.blo, (unsigned long long)d.bhi);
         size_t n = strlen(negs);
-        snprintf(negs + n, sizeof negs - n, "    gmem = alloc(%llu);\n", (unsigned long long)(d.bhi - d.blo + BLOB_SLACK + 8));
+        unsigned long long need = (unsigned long long)(d.bhi - d.blo + BLOB_SLACK + 8);
+        snprintf(negs + n, sizeof negs - n, "    gmem = alloc(%llu);\n", need);
+        if (need > ALLOC_MAX && !g_bigblk++)
+            snprintf(g_bigwhy, sizeof g_bigwhy, "the data sections need %llu bytes, more than the %d one .rex block holds", need, ALLOC_MAX);
         for (int i = 0; i < e.nsh; i++) {
             const RexShdr *sh = &e.sh[i];
             if (!(sh->flags & 2) || (sh->flags & 4) || sh->addr < d.blo || sh->addr >= d.bhi || sh->type == 8 || !sh->size) continue;

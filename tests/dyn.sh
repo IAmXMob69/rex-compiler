@@ -78,20 +78,34 @@ for cc in gcc clang; do
     $cc -O0 -no-pie -fno-pic -o "$T/st_$cc" "$T/st.c"
     ./rex match "$T/st_$cc" -o "$T/st_$cc.rex" >/dev/null 2>&1
 done
-# recovered source that does not build is refused with one plain line and
-# E603 (exit 91); the compiler's own messages never reach the user (here:
-# more stack slots than the decompiler names)
+# more stack slots than REX gives a function names: the function keeps its
+# stack in the frame block fr (and, past 64 names, its x temporaries too)
+for n in 70 200; do
+    python3 -c "
+n = $n
+print('__attribute__((noinline)) int many(int x){')
+for i in range(n): print('  volatile int a%d = x * %d + %d;' % (i, i + 1, i))
+print('  int s = 0;')
+for i in range(n): print('  s = s * 3 + a%d;' % i)
+print('  return s;}')
+print('int main(void){ return many(3) & 255; }')" > "$T/many.c"
+    for cc in gcc clang; do for o in O0 O2; do
+        $cc -$o -no-pie -fno-pic -o "$T/many" "$T/many.c"
+        ./rex match "$T/many" -o "$T/many.rex" >/dev/null 2>&1
+    done; done
+done
+# a frame bigger than one REX alloc (a 4 KB page) is refused before building
+# with E606 (exit 94), one plain line, the source still written
 python3 -c "
 print('__attribute__((noinline)) int many(int x){')
-for i in range(70): print('  volatile int a%d = x + %d;' % (i, i))
-print('  return ' + ' + '.join('a%d' % i for i in range(70)) + ';}')
-print('int main(void){ return many(3) & 255; }')" > "$T/many.c"
-gcc -O0 -no-pie -fno-pic -o "$T/many" "$T/many.c"
-set +e; ./rex match "$T/many" -o "$T/many.rex" > "$T/many.out" 2> "$T/many.err"; rc=$?; set -e
-test $rc -eq 91
-grep -q "doesn't build" "$T/many.err" && grep -q "E603: .* line [0-9]*: " "$T/many.err"
-test $(wc -l < "$T/many.err") -eq 2
-! grep -q "aborting" "$T/many.err" "$T/many.out"
+for i in range(400): print('  volatile int a%d = x * %d + %d;' % (i, i + 1, i))
+print('  int s = 0;')
+for i in range(400): print('  s = s * 3 + a%d;' % i)
+print('  return s;}')
+print('int main(void){ return many(3) & 255; }')" > "$T/big.c"
+gcc -O2 -no-pie -fno-pic -o "$T/big" "$T/big.c"
+set +e; ./rex match "$T/big" -o "$T/big.rex" > "$T/big.out" 2> "$T/big.err"; rc=$?; set -e
+test $rc -eq 94 && grep -q "E606: f[0-9]*: its stack needs [0-9]* bytes" "$T/big.err" && test $(wc -l < "$T/big.err") -eq 2 && test -s "$T/big.rex"
 # calls through function pointers go through callp, which picks the recovered
 # function by the original address the pointer holds (tests/dec/fptr.c:
 # a table, a pointer argument, a struct of pointers; and a tail call)

@@ -89,6 +89,15 @@ Each entry below is the plain sentence REX prints, then a one-line fix.
   `--verify` stop with exit status 93; `tosource` still writes the source.
   Fix: none yet in REX; the line names the function or the reason.
 
+- **E606** — This program needs a bigger block of memory than .rex can hand out (4 KB).
+  A REX `alloc` is one 4 KB page, 4088 bytes of it usable. A function whose
+  stack lives in the frame block `fr` (it indexes or takes the address of its
+  stack, or has more locals than REX gives a function names) or the data
+  block `gmem` must fit in one. `match` and `--verify` stop with exit status
+  94 before building; `tosource` still writes the source. The line names the
+  function or the data sections and the size needed.
+  Fix: none yet in REX.
+
 ## Not yet in the code
 
 Shorter command-line, runtime, and `.rex` language codes (ranges E001–E012 and

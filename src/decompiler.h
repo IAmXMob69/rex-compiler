@@ -9,5 +9,6 @@ int rex_decompile(const char *in, const char *out, int verbose);
 int rex_decompile_libcalls(char *name, size_t n);
 /* Nonzero when a pointer call in the recovered source cannot reach every target (E605); why gets the reason. */
 int rex_decompile_fpcalls(char *why, size_t n);
+int rex_decompile_bigblock(char *why, size_t n);
 
 #endif
