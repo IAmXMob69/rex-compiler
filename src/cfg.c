@@ -409,6 +409,7 @@ static void seed_symbols(const RexElf *e, AddrList *calls) {
 int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
     memset(p, 0, sizeof(*p));
     AddrList calls = {0}, ft = {0};
+    uint64_t dyn_main = 0;     /* main as a dynamic _start passes it to the C library */
     if (al_push(&calls, e->entry)) return fail(err, errlen, "out of memory");
     seed_tail_targets(e, &ft);
     p->funcs = calloc(CFG_MAX_FUNCS, sizeof(CfgFunc));
@@ -432,6 +433,26 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
                 if (f->insns[i].op == X86_CALL && f->insns[i].ops[0].kind == XO_REL &&
                     !rex_elf_import_at(e, f->insns[i].ops[0].target)) { p->main_addr = f->insns[i].ops[0].target; break; }
         }
+        /* A dynamic program's _start hands main to the C library: the address
+         * goes in rdi (mov $main / lea main(%rip)) and the call is through the
+         * GOT. Remember it: main is code that really runs, so failing to build it
+         * must be reported, not dropped like a symbol-only helper below. */
+        if (a == e->entry && !p->main_addr && e->dynamic) {
+            uint64_t cand = 0;
+            for (int i = 0; i < f->ninsns; i++) {
+                const X86Insn *x = &f->insns[i];
+                const X86Operand *d0 = &x->ops[0], *s1 = &x->ops[1];
+                if ((x->op == X86_MOV || x->op == X86_LEA) && d0->kind == XO_REG && d0->reg == 7 && !d0->xmm) {
+                    cand = 0;
+                    if (x->op == X86_MOV && s1->kind == XO_IMM) cand = (uint64_t)s1->imm;
+                    else if (x->op == X86_LEA && s1->kind == XO_MEM && s1->base == X86_RIP) cand = s1->target;
+                } else if (x->op == X86_CALL) {
+                    size_t av = 0;
+                    if (cand && x->ops[0].kind == XO_MEM && rex_elf_code_at(e, cand, &av) && av > 0) dyn_main = cand;
+                    break;
+                }
+            }
+        }
     }
     /* Phase 2: functions named only by the symbol table and not reached above
      * (library helpers like memcpy the linker pulled in). Build them so their
@@ -450,10 +471,38 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
         f->reachable = 0;
         snprintf(f->name, sizeof(f->name), "fn_%llx", (unsigned long long)a);
         char tmperr[256];
-        if (build_func(e, f, &syms, &ft, tmperr, sizeof(tmperr))) { cfg_func_free(f); continue; }
+        if (build_func(e, f, &syms, &ft, tmperr, sizeof(tmperr))) {
+            cfg_func_free(f);
+            if (a == dyn_main) {
+                snprintf(err, errlen, "%s", tmperr);
+                free(syms.v); cfg_free(p); free(calls.v); free(ft.v); return -1;
+            }
+            continue;
+        }
         p->nfuncs++;
     }
     free(syms.v);
+    /* Stripped: no symbol named main. Build it and what it calls the way phase 1
+     * builds everything, as code that runs. */
+    if (dyn_main && cfg_find_func(p, dyn_main) < 0) {
+        int c0 = calls.n;
+        if (al_push(&calls, dyn_main)) { cfg_free(p); free(calls.v); free(ft.v); return fail(err, errlen, "out of memory"); }
+        for (int ci = c0; ci < calls.n; ci++) {
+            uint64_t ca = calls.v[ci];
+            if (cfg_find_func(p, ca) >= 0) continue;
+            if (p->nfuncs >= CFG_MAX_FUNCS) { cfg_free(p); free(calls.v); free(ft.v); return fail(err, errlen, "too many functions"); }
+            CfgFunc *f = &p->funcs[p->nfuncs];
+            memset(f, 0, sizeof(*f));
+            f->addr = ca;
+            f->reachable = 1;
+            snprintf(f->name, sizeof(f->name), "fn_%llx", (unsigned long long)ca);
+            if (build_func(e, f, &calls, &ft, err, errlen)) { cfg_func_free(f); cfg_free(p); free(calls.v); free(ft.v); return -1; }
+            p->nfuncs++;
+        }
+    }
+    /* (A PIE _start's lea main(%rip) may already have built it in phase 1.) A
+     * symbol named main, below, still has the last word. */
+    if (dyn_main && !p->main_addr && cfg_find_func(p, dyn_main) >= 0) p->main_addr = dyn_main;
     /* Name functions from symbols; set main_addr if main is present. */
     for (int si = 0; si < e->nsh; si++) {
         const RexShdr *sec = &e->sh[si];

@@ -58,6 +58,21 @@ test $rc -eq 91
 grep -q "doesn't build" "$T/fp.err" && grep -q "E603: .* line [0-9]*: " "$T/fp.err"
 test $(wc -l < "$T/fp.err") -eq 2
 ! grep -q "aborting" "$T/fp.err" "$T/fp.out"
+# a dynamic _start passes main to the C library in rdi: main is found from
+# there, so a stripped program still has one, and a main that cannot be built
+# is reported instead of dropped (which left a source without main)
+printf '%s\n' '__attribute__((noinline)) int tri(int n){int s=0;for(int i=1;i<=n;i++)s+=i*i;return s;}' \
+    'int main(void){int t=0;for(int k=0;k<9;k++)t+=tri(k);return t&0x7f;}' > "$T/sp.c"
+gcc -O1 -no-pie -fno-pic -s -o "$T/sp_gcc" "$T/sp.c"
+clang -O1 -no-pie -fno-pic -s -o "$T/sp_clang" "$T/sp.c"
+gcc -O1 -pie -fpie -s -o "$T/sp_pie" "$T/sp.c"
+for b in sp_gcc sp_clang sp_pie; do ./rex match "$T/$b" -o "$T/$b.rex" >/dev/null 2>&1; grep -q "^fn main" "$T/$b.rex"; done
+# (unsigned % constant is a one-operand mul, not decoded yet: if it is one day,
+# pick another instruction REX does not know)
+printf '%s\n' 'int main(int c, char **v){unsigned long s=(unsigned long)c*977;return (int)(s % 251);}' > "$T/um.c"
+gcc -O1 -no-pie -fno-pic -o "$T/um" "$T/um.c"
+set +e; ./rex tosource "$T/um" -o "$T/um.rex" 2> "$T/um.err"; rc=$?; set -e
+test $rc -ne 0 && grep -q "E200" "$T/um.err" && test ! -s "$T/um.rex" -o ! -e "$T/um.rex"
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"
