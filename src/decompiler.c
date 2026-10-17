@@ -2474,8 +2474,16 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
         if (join < 0 || ret_only(&f->blocks[join])) join = (ta == stop || fb == stop) ? stop : common_reach(f, g, bi, ta, fb, lc, stop);
         int ret_join = join >= 0 && ret_only(&f->blocks[join]);
         Snap s; snap_take(d, &s);
+        /* both arms start from this block's flags (a successor may inherit
+         * them): a compare in the first arm must not leak into the second */
+        const IrInsn *cmp0 = d->cmp;
+        int snap0 = d->cmp_snap;
+        Ex ca = snap0 ? ex(d->cmpa.s) : ex(""), cb = snap0 ? ex(d->cmpb.s) : ex("");
         char *armA = ta == join && !ret_join ? strdup("") : arm_text(d, f, g, ta, join, lc, depth + 1);
         snap_restore(d, &s, 1);
+        if (d->cmp_snap) { ex_free(d->cmpa); ex_free(d->cmpb); }
+        d->cmp = cmp0; d->cmp_snap = snap0;
+        if (snap0) { d->cmpa = ca; d->cmpb = cb; } else { ex_free(ca); ex_free(cb); }
         char *armB = fb == join && !ret_join ? strdup("") : arm_text(d, f, g, fb, join, lc, depth + 1);
         if (!*armA && !*armB) { /* both empty: keep side effects only */ }
         else if (!*armA) {
