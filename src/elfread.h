@@ -28,6 +28,16 @@ typedef struct {
     uint64_t flags, addr, offset, size;
 } RexShdr;
 
+/* A function the program borrows from a shared library (libc). got is the
+ * slot the dynamic loader fills in; plt is the stub that jumps through it,
+ * 0 if the program only calls through the slot. */
+typedef struct {
+    uint64_t got, plt;
+    char name[48];      /* copied, always terminated, identifier characters only */
+} RexImport;
+
+#define REX_ELF_MAX_IMPORTS 4096
+
 typedef struct {
     unsigned char *data;
     size_t size;
@@ -36,6 +46,10 @@ typedef struct {
     int nph, nsh;
     RexPhdr *ph;
     RexShdr *sh;
+    int dynamic;        /* has PT_INTERP or PT_DYNAMIC */
+    int pie;            /* ET_DYN program, read at base 0 */
+    int nimp;
+    RexImport *imp;
 } RexElf;
 
 int rex_elf_parse(const unsigned char *data, size_t size, RexElf *out, char *err, size_t errlen);
@@ -44,5 +58,9 @@ void rex_elf_free(RexElf *e);
 int rex_elf_exec_segments(const RexElf *e);
 /* File bytes behind vaddr inside an executable PT_LOAD, NULL if none. */
 const unsigned char *rex_elf_code_at(const RexElf *e, uint64_t vaddr, size_t *avail);
+/* Name of the library function whose PLT stub starts at addr, NULL if none. */
+const char *rex_elf_import_at(const RexElf *e, uint64_t addr);
+/* Name of the library function whose GOT slot is at got, NULL if none. */
+const char *rex_elf_import_got(const RexElf *e, uint64_t got);
 
 #endif

@@ -63,7 +63,8 @@ int main(void) {
     build(); img[6] = 0; expect(0, "version");
     build(); img[7] = 9; expect(0, "osabi");
     build(); w16(18, 40); expect(0, "arm");
-    build(); w16(16, 3); expect(0, "dyn");
+    build(); w16(16, 3); expect(1, "pie");                 /* ET_DYN with an entry: a PIE program */
+    build(); w16(16, 3); w64(24, 0); expect(0, "shared library");   /* ET_DYN, no entry: not a program */
     build(); w16(16, 1); expect(0, "rel");
     build(); w16(16, 4); expect(0, "core");
     build(); w16(52, 10); expect(0, "ehsize");

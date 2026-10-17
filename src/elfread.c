@@ -29,7 +29,105 @@ void rex_elf_free(RexElf *e) {
     free(e->data);
     free(e->ph);
     free(e->sh);
+    free(e->imp);
     memset(e, 0, sizeof(*e));
+}
+
+/* File bytes behind [vaddr, vaddr+len) inside any PT_LOAD, NULL if not all there. */
+static unsigned char *file_at(RexElf *e, uint64_t vaddr, uint64_t len) {
+    for (int i = 0; i < e->nph; i++) {
+        const RexPhdr *h = &e->ph[i];
+        if (h->type != REX_PT_LOAD || vaddr < h->vaddr) continue;
+        uint64_t d = vaddr - h->vaddr;
+        if (d > h->filesz || len > h->filesz - d) continue;
+        return e->data + h->offset + d;
+    }
+    return NULL;
+}
+
+static int sec_named(const RexElf *e, uint32_t type, const char *name) {
+    for (int i = 0; i < e->nsh; i++)
+        if (e->sh[i].type == type && !strcmp(e->sh[i].name, name)) return i;
+    return -1;
+}
+
+/* Library imports from the relocation tables (JUMP_SLOT and GLOB_DAT name a
+ * GOT slot after a .dynsym entry), then the PLT stub that jumps through each
+ * slot. A PIE is read at base 0, so its RELATIVE relocations are applied to
+ * the copy: a pointer stored in data then reads as the address it names.
+ * Malformed tables are skipped, never trusted. Returns nonzero only on OOM. */
+static int read_imports(RexElf *e) {
+    int ds = sec_named(e, 11, ".dynsym"), dst = sec_named(e, 3, ".dynstr");
+    for (int ri = 0; ri < e->nsh; ri++) {
+        const RexShdr *r = &e->sh[ri];
+        if (r->type != 4 || r->size % 24) continue;             /* SHT_RELA */
+        for (uint64_t off = 0; off + 24 <= r->size; off += 24) {
+            const unsigned char *p = e->data + r->offset + off;
+            uint64_t where = rd64(p), info = rd64(p + 8), addend = rd64(p + 16);
+            uint32_t rtype = (uint32_t)info, rsym = (uint32_t)(info >> 32);
+            if (rtype == 8) {                                     /* R_X86_64_RELATIVE */
+                unsigned char *w = e->pie ? file_at(e, where, 8) : NULL;
+                if (w) for (int k = 0; k < 8; k++) w[k] = (unsigned char)(addend >> (8 * k));
+                continue;
+            }
+            if (rtype != 6 && rtype != 7) continue;               /* GLOB_DAT / JUMP_SLOT */
+            if (ds < 0 || dst < 0 || rsym == 0) continue;
+            const RexShdr *sy = &e->sh[ds], *st = &e->sh[dst];
+            if (sy->size % 24 || (uint64_t)rsym >= sy->size / 24) continue;
+            uint32_t nm = rd32(e->data + sy->offset + (uint64_t)rsym * 24);
+            if (nm >= st->size) continue;
+            const unsigned char *s = e->data + st->offset + nm;
+            uint64_t left = st->size - nm;
+            char name[48]; size_t k = 0;
+            while (k < left && k < sizeof(name) - 1 && s[k] && s[k] != '@') {
+                unsigned char c = s[k];
+                name[k] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') ? (char)c : '_';
+                k++;
+            }
+            name[k] = 0;
+            if (!k || (name[0] >= '0' && name[0] <= '9')) continue;
+            if (e->nimp >= REX_ELF_MAX_IMPORTS) continue;
+            RexImport *ni = realloc(e->imp, (size_t)(e->nimp + 1) * sizeof(RexImport));
+            if (!ni) return 1;
+            e->imp = ni;
+            RexImport *im = &e->imp[e->nimp++];
+            memset(im, 0, sizeof(*im));
+            im->got = where;
+            memcpy(im->name, name, k + 1);
+        }
+    }
+    /* PLT stubs: jmp *slot(%rip), optionally bnd-prefixed and after endbr64. */
+    for (int si = 0; si < e->nsh && e->nimp; si++) {
+        const RexShdr *sc = &e->sh[si];
+        if (sc->type != 1 || !(sc->flags & 4) || strncmp(sc->name, ".plt", 4)) continue;
+        const unsigned char *b = e->data + sc->offset;
+        for (uint64_t j = 0; j + 6 <= sc->size; j++) {
+            if (b[j] != 0xff || b[j + 1] != 0x25) continue;
+            int32_t disp = (int32_t)rd32(b + j + 2);
+            uint64_t slot = sc->addr + j + 6 + (uint64_t)(int64_t)disp;
+            for (int k = 0; k < e->nimp; k++) {
+                if (e->imp[k].got != slot || e->imp[k].plt) continue;
+                uint64_t s0 = j;
+                if (s0 >= 1 && b[s0 - 1] == 0xf2) s0--;
+                if (s0 >= 4 && b[s0 - 4] == 0xf3 && b[s0 - 3] == 0x0f && b[s0 - 2] == 0x1e && b[s0 - 1] == 0xfa) s0 -= 4;
+                e->imp[k].plt = sc->addr + s0;
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+const char *rex_elf_import_at(const RexElf *e, uint64_t addr) {
+    for (int k = 0; k < e->nimp; k++)
+        if (e->imp[k].plt && e->imp[k].plt == addr) return e->imp[k].name;
+    return NULL;
+}
+
+const char *rex_elf_import_got(const RexElf *e, uint64_t got) {
+    for (int k = 0; k < e->nimp; k++)
+        if (e->imp[k].got == got) return e->imp[k].name;
+    return NULL;
 }
 
 int rex_elf_parse(const unsigned char *data, size_t size, RexElf *out, char *err, size_t errlen) {
@@ -49,9 +147,11 @@ int rex_elf_parse(const unsigned char *data, size_t size, RexElf *out, char *err
     if (rd32(data + 20) > 1) return fail(err, errlen, "bad ELF version field");
     if (machine != 62) return fail(err, errlen, "unsupported machine %u (only x86-64)", machine);
     if (type == 1) return fail(err, errlen, "unsupported: relocatable object, not an executable");
-    if (type == 3) return fail(err, errlen, "unsupported: shared object or PIE (only ET_EXEC for now)");
+    /* ET_DYN is a PIE program when it has an entry point; a plain shared
+     * library has none and is not a program. */
+    if (type == 3 && rd64(data + 24) == 0) return fail(err, errlen, "unsupported: shared library, not a program (no entry point)");
     if (type == 4) return fail(err, errlen, "unsupported: core dump");
-    if (type != 2) return fail(err, errlen, "unsupported ELF type %u", type);
+    if (type != 2 && type != 3) return fail(err, errlen, "unsupported ELF type %u", type);
 
     uint64_t entry = rd64(data + 24), phoff = rd64(data + 32), shoff = rd64(data + 40);
     uint16_t ehsize = rd16(data + 52), phentsize = rd16(data + 54), phnum = rd16(data + 56);
@@ -76,6 +176,7 @@ int rex_elf_parse(const unsigned char *data, size_t size, RexElf *out, char *err
         h->type = rd32(p); h->flags = rd32(p + 4);
         h->offset = rd64(p + 8); h->vaddr = rd64(p + 16);
         h->filesz = rd64(p + 32); h->memsz = rd64(p + 40); h->align = rd64(p + 48);
+        if (h->type == 2 || h->type == 3) e.dynamic = 1;   /* PT_DYNAMIC / PT_INTERP */
         if (h->type != REX_PT_LOAD) continue;
         if (!in_file(h->offset, h->filesz, size)) { rex_elf_free(&e); return fail(err, errlen, "segment %d out of bounds", i); }
         if (h->filesz > h->memsz) { rex_elf_free(&e); return fail(err, errlen, "segment %d file size exceeds memory size", i); }
@@ -127,6 +228,8 @@ int rex_elf_parse(const unsigned char *data, size_t size, RexElf *out, char *err
     if (!e.data) { rex_elf_free(&e); return fail(err, errlen, "out of memory"); }
     memcpy(e.data, data, size);
     e.size = size;
+    e.pie = type == 3;
+    if (read_imports(&e)) { rex_elf_free(&e); return fail(err, errlen, "out of memory"); }
     *out = e;
     return 0;
 }
