@@ -454,8 +454,43 @@ static int op_points_data(const D *d, const IrOperand *o) {
         (uint64_t)o->disp >= d->blo && (uint64_t)o->disp < d->bhi + BLOB_SLACK;  /* end-pointer idiom: base+disp with disp one past the data */
     return 0;
 }
+/* Does emitted code point into [lo, hi)? The same operand rules blob_scan uses. */
+static int refs_range(D *d, uint64_t lo, uint64_t hi) {
+    uint64_t slo = d->blo, shi = d->bhi;
+    d->blo = lo; d->bhi = hi;
+    int hit = 0;
+    for (int fi = 0; fi < d->m->nfuncs && !hit; fi++) {
+        const IrFunc *f = &d->m->funcs[fi];
+        if (!strcmp(f->name, "start") || !strcmp(f->name, "_start") || d->fun[fi].kind == 1) continue;
+        for (int b = 0; b < f->nblocks && !hit; b++)
+            for (int k = 0; k < f->blocks[b].ninsns && !hit; k++) {
+                const IrInsn *in = &f->blocks[b].insns[k];
+                if (in->op == IR_CALL || in->op == IR_JMP || in->op == IR_BR) continue;
+                hit = op_points_data(d, &in->a) || op_points_data(d, &in->b) || op_points_data(d, &in->dst) ||
+                      (in->op == IR_ADDR && in->a.kind == IR_O_MEM && in->a.base == IR_NOREG && in->a.index == IR_NOREG &&
+                       (uint64_t)in->a.disp >= lo && (uint64_t)in->a.disp < hi);
+            }
+    }
+    d->blo = slo; d->bhi = shi;
+    return hit;
+}
 static void blob_scan(D *d) {
     blob_range(d);
+    /* In a dynamically linked program, .data and .bss also hold the C
+     * runtime's own state, and they sit pages away from .rodata. Span only
+     * the sections the emitted code points into, so gmem stays small. */
+    if (d->foreign && d->bhi && d->elf && d->elf->dynamic) {
+        uint64_t lo = ~0ULL, hi = 0;
+        for (int i = 0; i < d->elf->nsh; i++) {
+            const RexShdr *sc = &d->elf->sh[i];
+            if (!sc->size || sc->addr < d->blo || sc->addr + sc->size > d->bhi) continue;
+            if (!(sc->flags & 2) || (sc->flags & 4)) continue;
+            if (!refs_range(d, sc->addr, sc->addr + sc->size)) continue;
+            if (sc->addr < lo) lo = sc->addr;
+            if (sc->addr + sc->size > hi) hi = sc->addr + sc->size;
+        }
+        if (hi > lo) { d->blo = lo; d->bhi = hi; } else d->blo = d->bhi = 0;
+    }
     if (!d->foreign || d->bhi == 0) return;
     for (int fi = 0; fi < d->m->nfuncs && !d->blob; fi++) {
         const IrFunc *f = &d->m->funcs[fi];
