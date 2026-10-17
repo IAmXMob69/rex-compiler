@@ -391,12 +391,82 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         l->flags = FL_NONE;
         if (cfg_is_exit(prev, in)) emit(l, IR_TRAP);
         break;
+    case X86_SSE: {
+        /* xmm pseudo-registers: low half = 16+n, high half = 32+n. A 16-byte
+         * move is two 8-byte moves; the decompiler routes 16..47 to its xmm
+         * value env. Only moves and the xor-self zero are modeled. */
+        const X86Operand *o0 = in->nops > 0 ? &in->ops[0] : NULL;
+        const X86Operand *o1 = in->nops > 1 ? &in->ops[1] : NULL;
+        switch (in->cc) {
+        case SSE_ZERO: {
+            int n = o0->reg;
+            i = emit(l, IR_MOV); i->dst = ir_reg(16 + n, 8); i->a = ir_imm(0, 8);
+            i = emit(l, IR_MOV); i->dst = ir_reg(32 + n, 8); i->a = ir_imm(0, 8);
+            break;
+        }
+        case SSE_LOAD16: {
+            int n = o0->reg;
+            IrOperand m = conv(l, o1); m.width = 8;
+            IrOperand mh = m; mh.disp += 8;
+            i = emit(l, IR_LOAD); i->dst = ir_reg(16 + n, 8); i->a = m;
+            i = emit(l, IR_LOAD); i->dst = ir_reg(32 + n, 8); i->a = mh;
+            break;
+        }
+        case SSE_STORE16: {
+            int n = o1->reg;
+            IrOperand m = conv(l, o0); m.width = 8;
+            IrOperand mh = m; mh.disp += 8;
+            i = emit(l, IR_STORE); i->dst = m;  i->a = ir_reg(16 + n, 8);
+            i = emit(l, IR_STORE); i->dst = mh; i->a = ir_reg(32 + n, 8);
+            break;
+        }
+        case SSE_MOVRR: {
+            int dn = o0->reg, sn = o1->reg;
+            i = emit(l, IR_MOV); i->dst = ir_reg(16 + dn, 8); i->a = ir_reg(16 + sn, 8);
+            i = emit(l, IR_MOV); i->dst = ir_reg(32 + dn, 8); i->a = ir_reg(32 + sn, 8);
+            break;
+        }
+        case SSE_LOADQ: {
+            int n = o0->reg;
+            if (o1->kind == XO_MEM) { IrOperand m = conv(l, o1); m.width = 8; i = emit(l, IR_LOAD); i->dst = ir_reg(16 + n, 8); i->a = m; }
+            else { i = emit(l, IR_MOV); i->dst = ir_reg(16 + n, 8); i->a = ir_reg(16 + o1->reg, 8); }
+            i = emit(l, IR_MOV); i->dst = ir_reg(32 + n, 8); i->a = ir_imm(0, 8);
+            break;
+        }
+        case SSE_STOREQ: {
+            int n = o1->reg;
+            IrOperand m = conv(l, o0); m.width = 8;
+            i = emit(l, IR_STORE); i->dst = m; i->a = ir_reg(16 + n, 8);
+            break;
+        }
+        case SSE_MOVD_TOX: {
+            int n = o0->reg, w = o1->size;
+            if (o1->kind == XO_MEM) { IrOperand m = conv(l, o1); m.width = w; i = emit(l, IR_LOAD); i->dst = ir_reg(16 + n, w); i->a = m; }
+            else { i = emit(l, IR_MOV); i->dst = ir_reg(16 + n, w); i->a = ir_reg(o1->reg, w); }
+            i = emit(l, IR_MOV); i->dst = ir_reg(32 + n, 8); i->a = ir_imm(0, 8);
+            break;
+        }
+        case SSE_MOVD_FROMX: {
+            int n = o1->reg, w = o0->size;
+            if (o0->kind == XO_MEM) { IrOperand m = conv(l, o0); m.width = w; i = emit(l, IR_STORE); i->dst = m; i->a = ir_reg(16 + n, w); }
+            else { wrote(l, ir_reg(o0->reg, w)); i = emit(l, IR_MOV); i->dst = ir_reg(o0->reg, w); i->a = ir_reg(16 + n, w); if (w == 4) zext32(l, ir_reg(o0->reg, 4)); }
+            break;
+        }
+        default: lfail(l, "SSE form not supported"); break;
+        }
+        break;
+    }
     default:
         lfail(l, "instruction %s is not lifted", x86_op_name(in->op));
     }
 }
 
-const char *x86_ir_reg_name(int reg) { return reg >= 0 && reg < 16 ? x86_reg_name(reg, 8, 0) : NULL; }
+const char *x86_ir_reg_name(int reg) {
+    if (reg >= 0 && reg < 16) return x86_reg_name(reg, 8, 0);
+    if (reg >= 16 && reg < 32) { static char b[8]; snprintf(b, sizeof b, "xmm%dl", reg - 16); return b; }
+    if (reg >= 32 && reg < 48) { static char b[8]; snprintf(b, sizeof b, "xmm%dh", reg - 32); return b; }
+    return NULL;
+}
 
 IrModule *x86_lift(const CfgProgram *p, char *err, size_t errlen) {
     IrModule *m = ir_module_new();

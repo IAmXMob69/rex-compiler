@@ -16,6 +16,7 @@ typedef struct {
     int size;           /* bytes */
     int reg;            /* XO_REG: 0-15 */
     int high8;          /* XO_REG size 1: ah/ch/dh/bh */
+    int xmm;            /* XO_REG is an xmm register (SSE) */
     int64_t imm;        /* XO_IMM, sign-extended */
     int base, index;    /* XO_MEM: register, X86_RIP, or X86_NOREG */
     int scale;
@@ -36,8 +37,22 @@ typedef enum {
     X86_HLT, X86_UD2,   /* terminators */
     X86_CMOVCC,         /* cc in .cc; dst, src */
     X86_XCHG,           /* exchange dst, src */
+    X86_SSE,            /* SSE move/zero; .cc holds an SSE_* sub-kind */
     X86_OP_COUNT
 } X86Opcode;
+
+/* X86_SSE sub-kinds, stored in X86Insn.cc. Only data movement and the
+ * xor-self zero idiom; packed arithmetic is not decoded. */
+enum {
+    SSE_LOAD16,   /* dst xmm = [mem] (16 bytes) */
+    SSE_STORE16,  /* [mem] = src xmm (16 bytes) */
+    SSE_MOVRR,    /* dst xmm = src xmm (16 bytes) */
+    SSE_ZERO,     /* dst xmm = 0 (xorps/pxor self) */
+    SSE_LOADQ,    /* dst xmm = zext [mem] (low 8 bytes, high zeroed) */
+    SSE_STOREQ,   /* [mem] = src xmm (low 8 bytes) */
+    SSE_MOVD_TOX, /* dst xmm = zext src r/m (4 or 8 bytes) */
+    SSE_MOVD_FROMX/* dst r/m = src xmm (low 4 or 8 bytes) */
+};
 
 typedef struct {
     X86Opcode op;

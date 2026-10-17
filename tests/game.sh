@@ -51,6 +51,12 @@ done
 grep -q 'let fr = gfr;' "$T/s.rex"
 # frame block is handed back on return
 grep -q 'free(fr);' "$T/s.rex"
+if command -v clang >/dev/null 2>&1; then
+    # clang -O1 zeroes a stack buffer with xorps + movaps; the SSE move subset
+    # recovers that to REX that behaves the same.
+    build clang O1 statemachine
+    ./rex match "$T/statemachine_clang_O1" -o "$T/sm1.rex" >/dev/null
+fi
 # unsigned div/mod: rebuild and recovered source behave the same
 for o in O0 O1; do
     "gcc" "-$o" $G -o "$T/udiv_$o" tests/udiv.c

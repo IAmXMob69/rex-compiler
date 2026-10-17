@@ -184,6 +184,8 @@ typedef struct {
     int verbose;
     Ex reg[16];
     int has[16];
+    Ex xreg[32];        /* foreign SSE xmm pseudo-regs: lo 16..31, hi 32..47 */
+    int xhas[32];
     Ex *stk;
     int nstk, cstk;
     Fun *cur;
@@ -228,6 +230,11 @@ static int mentions_v(const char *s, const char *vn) {
     return 0;
 }
 static void setr(D *d, int r, Ex v) {
+    if (r >= 16 && r < 48) {
+        if (d->xhas[r - 16]) ex_free(d->xreg[r - 16]);
+        d->xreg[r - 16] = v; d->xhas[r - 16] = 1;
+        return;
+    }
     if (r < 0 || r > 15) { ex_free(v); return; }
     if (d->has[r]) ex_free(d->reg[r]);
     /* Runaway expressions (register recurrences in optimized code) become
@@ -244,6 +251,7 @@ static void setr(D *d, int r, Ex v) {
     d->reg[r] = v; d->has[r] = 1;
 }
 static Ex getr(D *d, int r) {
+    if (r >= 16 && r < 48) return d->xhas[r - 16] ? ex(d->xreg[r - 16].s) : ex("0");
     if (r >= 0 && r < 16 && d->has[r]) return ex(d->reg[r].s);
     if (d->foreign && r >= 0 && r < 16) { d->vused |= 1u << r; return exf("v%d", r); }
     return exf("r%d", r);
@@ -2143,6 +2151,7 @@ static void decompile_fun(D *d, Fun *fi) {
 
     /* reset env */
     for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
+    for (int i = 0; i < 32; i++) { if (d->xhas[i]) ex_free(d->xreg[i]); d->xhas[i] = 0; }
     while (d->nstk) ex_free(d->stk[--d->nstk]);
     d->cmp = NULL;
     d->cur = fi;
@@ -2156,6 +2165,7 @@ static void decompile_fun(D *d, Fun *fi) {
         unsigned hdr_vu = 0;
         for (int pass = 0; pass < 2; pass++) {
             for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
+            for (int i = 0; i < 32; i++) { if (d->xhas[i]) ex_free(d->xreg[i]); d->xhas[i] = 0; }
             while (d->nstk) ex_free(d->stk[--d->nstk]);
             for (int a = 0; a < fi->nargs; a++) setr(d, ARG[a], exf("%c", 'a' + a));
             if (d->frame) { setr(d, 4, exf("(fr + %d)", d->frame)); setr(d, 5, exf("(fr + %d)", d->frame)); }

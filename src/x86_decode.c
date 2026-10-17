@@ -85,6 +85,92 @@ static X86Operand rel_op(int64_t d) {
 static const X86Opcode alu[8] = { X86_ADD, X86_OR, X86_BAD, X86_BAD, X86_AND, X86_SUB, X86_XOR, X86_CMP };
 static const X86Opcode shf[8] = { X86_BAD, X86_BAD, X86_BAD, X86_BAD, X86_SHL, X86_SHR, X86_SHL, X86_SAR };
 
+static X86Operand xmm_op(int reg, int size) {
+    X86Operand o = {0};
+    o.kind = XO_REG; o.reg = reg; o.size = size; o.xmm = 1; o.base = o.index = X86_NOREG;
+    return o;
+}
+
+/* SSE move / xor-self-zero subset. b2 is the byte after 0F. o66/f3 are the
+ * mandatory prefixes. Returns 1 handled, 0 not an SSE opcode we model, -1 bad.
+ * Packed arithmetic (paddd, pshufd, punpck, pcmp, ...) is intentionally not
+ * decoded and stays an unsupported-instruction refusal. */
+static int decode_sse(Rd *r, Ctx *c, X86Insn *out, unsigned b2, int o66, int f3) {
+    X86Operand e, xr;
+    int w8 = c->w ? 8 : 4;
+    if (!o66 && !f3) {              /* movups/movaps/xorps */
+        if (b2 == 0x10 || b2 == 0x28) {
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind == XO_MEM) out->cc = SSE_LOAD16; else { e.xmm = 1; e.size = 16; out->cc = SSE_MOVRR; }
+            set2(out, X86_SSE, xr, e); return 1;
+        }
+        if (b2 == 0x11 || b2 == 0x29) {
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind == XO_MEM) { out->cc = SSE_STORE16; set2(out, X86_SSE, e, xr); }
+            else { e.xmm = 1; e.size = 16; out->cc = SSE_MOVRR; set2(out, X86_SSE, e, xr); }
+            return 1;
+        }
+        if (b2 == 0x57) {           /* xorps: only the self-zero idiom */
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind != XO_MEM && e.reg == c->reg) { out->cc = SSE_ZERO; set1(out, X86_SSE, xr); return 1; }
+            return -1;
+        }
+        return 0;
+    }
+    if (o66 && !f3) {              /* movdqa / movd / movq store / pxor */
+        if (b2 == 0x6f) {
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind == XO_MEM) out->cc = SSE_LOAD16; else { e.xmm = 1; e.size = 16; out->cc = SSE_MOVRR; }
+            set2(out, X86_SSE, xr, e); return 1;
+        }
+        if (b2 == 0x7f) {
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind == XO_MEM) { out->cc = SSE_STORE16; set2(out, X86_SSE, e, xr); }
+            else { e.xmm = 1; e.size = 16; out->cc = SSE_MOVRR; set2(out, X86_SSE, e, xr); }
+            return 1;
+        }
+        if (b2 == 0x6e) {           /* movd/movq xmm, r/m */
+            e = modrm(r, c, w8); xr = xmm_op(c->reg, 16);
+            out->cc = SSE_MOVD_TOX; set2(out, X86_SSE, xr, e); return 1;
+        }
+        if (b2 == 0x7e) {           /* movd/movq r/m, xmm */
+            e = modrm(r, c, w8); xr = xmm_op(c->reg, 16);
+            out->cc = SSE_MOVD_FROMX; set2(out, X86_SSE, e, xr); return 1;
+        }
+        if (b2 == 0xd6) {           /* movq xmm/m64, xmm : store low 8 */
+            e = modrm(r, c, 8); xr = xmm_op(c->reg, 16);
+            if (e.kind != XO_MEM) return -1;
+            out->cc = SSE_STOREQ; set2(out, X86_SSE, e, xr); return 1;
+        }
+        if (b2 == 0xef) {           /* pxor: only the self-zero idiom */
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind != XO_MEM && e.reg == c->reg) { out->cc = SSE_ZERO; set1(out, X86_SSE, xr); return 1; }
+            return -1;
+        }
+        return 0;
+    }
+    if (f3 && !o66) {              /* movdqu / movq load */
+        if (b2 == 0x6f) {
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind == XO_MEM) out->cc = SSE_LOAD16; else { e.xmm = 1; e.size = 16; out->cc = SSE_MOVRR; }
+            set2(out, X86_SSE, xr, e); return 1;
+        }
+        if (b2 == 0x7f) {
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind == XO_MEM) { out->cc = SSE_STORE16; set2(out, X86_SSE, e, xr); }
+            else { e.xmm = 1; e.size = 16; out->cc = SSE_MOVRR; set2(out, X86_SSE, e, xr); }
+            return 1;
+        }
+        if (b2 == 0x7e) {           /* movq xmm, xmm/m64 : load low 8, high zeroed */
+            e = modrm(r, c, 8); xr = xmm_op(c->reg, 16);
+            if (e.kind != XO_MEM) { e.xmm = 1; e.size = 16; }
+            out->cc = SSE_LOADQ; set2(out, X86_SSE, xr, e); return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
 int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out) {
     memset(out, 0, sizeof(*out));
     out->addr = addr;
@@ -110,14 +196,6 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
     X86Operand e, g;
 
     if (f2 || (f3 && b != 0x90 && b != 0xc3 && b != 0x0f)) goto bad;
-    if (f3 && b == 0x0f) {
-        /* endbr64 f3 0f 1e fa, endbr32 f3 0f 1e fb; nothing else with f3 0f. */
-        unsigned b2 = get8(&r), b3 = get8(&r);
-        if (r.bad || c.rex || o66 || seg || b2 != 0x1e || (b3 != 0xfa && b3 != 0xfb)) goto bad;
-        out->op = X86_ENDBR; out->cc = b3 == 0xfa ? 64 : 32;
-        out->size = (int)r.i;
-        return out->size;
-    }
 
     if (b < 0x40 && (b & 7) < 6) {
         X86Opcode op = alu[b >> 3];
@@ -254,7 +332,17 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
         }
     } else if (b == 0x0f) {
         unsigned b2 = get8(&r);
-        if (b2 == 0x05) out->op = X86_SYSCALL;
+        if (r.bad) goto bad;
+        int sr = decode_sse(&r, &c, out, b2, o66, f3);
+        if (sr < 0) goto bad;
+        if (sr == 0 && f3 && b2 == 0x1e) {  /* endbr64/endbr32: f3 0f 1e fa/fb */
+            unsigned b3 = get8(&r);
+            if (r.bad || c.rex || o66 || seg || (b3 != 0xfa && b3 != 0xfb)) goto bad;
+            out->op = X86_ENDBR; out->cc = b3 == 0xfa ? 64 : 32;
+            sr = 1;
+        }
+        if (sr != 0) { /* handled by SSE/endbr above */ }
+        else if (b2 == 0x05) out->op = X86_SYSCALL;
         else if (b2 == 0x0b) out->op = X86_UD2;
         else if (b2 >= 0x40 && b2 <= 0x4f) {
             out->cc = b2 & 15;
@@ -278,7 +366,7 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
         goto bad;
     }
     if (r.bad) goto bad;
-    if (f3 && out->op != X86_NOP && out->op != X86_RET) goto bad;
+    if (f3 && out->op != X86_NOP && out->op != X86_RET && out->op != X86_SSE && out->op != X86_ENDBR) goto bad;
     if (seg && out->op != X86_NOP) goto bad;
     out->size = (int)r.i;
     for (int k = 0; k < out->nops; k++) {
@@ -316,6 +404,7 @@ static const char *names[X86_OP_COUNT] = {
     "cmp", "test", "inc", "dec", "neg", "not",
     "jmp", "j", "set", "call", "ret",
     "nop", "cqo", "syscall", "endbr64", "leave", "hlt", "ud2", "cmov", "xchg",
+    "sse",
 };
 static const char *ccs[16] = { "o","no","b","ae","e","ne","be","a","s","ns","p","np","l","ge","le","g" };
 
@@ -324,7 +413,9 @@ const char *x86_cc_name(int cc) { return cc >= 0 && cc < 16 ? ccs[cc] : "?"; }
 
 static size_t put_op(char *b, size_t n, const X86Operand *o, int branch) {
     switch (o->kind) {
-    case XO_REG: return (size_t)snprintf(b, n, "%s%%%s", branch ? "*" : "", x86_reg_name(o->reg, o->size, o->high8));
+    case XO_REG:
+        if (o->xmm) return (size_t)snprintf(b, n, "%s%%xmm%d", branch ? "*" : "", o->reg);
+        return (size_t)snprintf(b, n, "%s%%%s", branch ? "*" : "", x86_reg_name(o->reg, o->size, o->high8));
     case XO_IMM: return (size_t)snprintf(b, n, "$%lld", (long long)o->imm);
     case XO_REL: return (size_t)snprintf(b, n, "0x%llx", (unsigned long long)o->target);
     case XO_MEM: {
