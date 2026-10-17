@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo/rex-logo-256.png" width="128" alt="REX logo"></p>
+
 # REX
 
 REX is a small compiler and a reverse-engineering / recovery toolchain for native binaries. The long-term aim is Ghidra / Binary Ninja class work: load a binary, recover control flow, lift to a machine IR, recompile and decompile. It is not there yet. Today the working load paths are ELF64 x86-64 non-PIE (`ET_EXEC`) and simple static PE32+ x86-64 (no imports/relocs/TLS/.NET). The high-quality decompile path is tuned for binaries REX itself emitted. There is no claim of parity with those tools.
