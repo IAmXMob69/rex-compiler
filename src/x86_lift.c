@@ -291,6 +291,10 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
             wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8)); wrote(l, ir_reg(11, 8));
             i = emit(l, IR_SEXT); i->dst = ir_reg(11, 8); i->a = d;
             i = emit(l, IR_SEXT); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 4);
+            /* the 64-bit divide reads rdx:rax: rdx is the sign of the widened rax,
+             * not cltd's 32-bit sign word (zero-extended, it made idiv overflow) */
+            i = emit(l, IR_MOV); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8);
+            i = emit(l, IR_SAR); i->dst = ir_reg(2, 8); i->a = ir_reg(2, 8); i->b = ir_imm(63, 1);
             i = emit(l, IR_REMS); i->dst = ir_reg(2, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
             i = emit(l, IR_DIVS); i->dst = ir_reg(0, 8); i->a = ir_reg(0, 8); i->b = ir_reg(11, 8);
             zext32(l, ir_reg(0, 4)); zext32(l, ir_reg(2, 4));
