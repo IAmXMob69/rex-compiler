@@ -429,6 +429,11 @@ static int data_addr(const D *d, uint64_t a, long long *init, int width) {
  * sections copied into one heap block (gmem); addresses become offsets. */
 #define BLOB_SLACK 256  /* end pointers (one past the last row) stay inside gmem */
 static int in_blob(const D *d, int64_t v) { return d->blob && (uint64_t)v >= d->blo && (uint64_t)v < d->bhi + BLOB_SLACK; }
+static int is_ident(const char *s) {
+    if (!s || !((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '_')) return 0;
+    for (; *s; s++) if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') || *s == '_')) return 0;
+    return 1;
+}
 static Ex daddr(D *d, int64_t v) {
     if (in_blob(d, v)) return exf("(gmem + %llu)", (unsigned long long)((uint64_t)v - d->blo));
     return exf("%lld", (long long)v);
@@ -928,7 +933,9 @@ static void store_ex(D *d, const IrInsn *in, Ex src, int src_imm, int depth) {
         d->written[si] = 1;
         if (!d->declared[agg]) { d->declared[agg] = 1; decl_agg(d, agg, depth); }
         emit(d, depth, "%s = %s;", dst.s, bare(src.s, bb, sizeof bb));
-    } else if (si >= 0 && !d->declared[si] && d->flat && depth == 1) {
+    } else if (si >= 0 && !d->declared[si] && d->flat && depth == 1 && is_ident(dst.s)) {
+        /* A slot in an address-taken frame is a memory cell (*(fr + n)), not a
+         * name: it is stored to below like any other cell, never declared. */
         d->declared[si] = 1;
         Slot *sl = &d->cur->slots[si];
         if (!sl->ptr_sid && !strncmp(src.s, "&", 1)) {
