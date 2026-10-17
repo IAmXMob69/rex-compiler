@@ -92,6 +92,7 @@ int cfg_find_func(const CfgProgram *p, uint64_t addr) {
 }
 
 static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, CfgJumpTable *jt);
+enum { HIST = 12 };   /* straight-line history kept for table matching */
 
 /* Function symbols a jmp may tail-call: STT_FUNC entries in code, except gcc's
  * .cold parts, which share their parent's frame and jump back into it. */
@@ -143,7 +144,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrLi
         uint64_t a = work.v[--work.n];
         const X86Insn *prev = NULL;
         X86Insn prevbuf;
-        X86Insn hist[4]; int nhist = 0;
+        X86Insn hist[HIST]; int nhist = 0;
         for (;;) {
             if (map_get(&seen, a) >= 0) break;
             size_t avail;
@@ -168,12 +169,47 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrLi
             if (in->op == X86_JMP) {
                 if (in->ops[0].kind != XO_REL) {
                     CfgJumpTable jt;
-                    int jr = jump_table(e, in, hist, nhist, &jt);
-                    /* jmp *reg that is not a table dispatch: an indirect tail jump
-                     * (crt code does this). The block ends with no successors. */
+                    int h4 = nhist < 4 ? nhist : 4;
+                    int jr = jump_table(e, in, hist + nhist - h4, h4, &jt);
                     const X86Operand *jo = &in->ops[0];
                     int tablelike = jo->kind == XO_MEM && jo->index != X86_NOREG && jo->scale == 8;
-                    if (jr == 1 && !tablelike) break;   /* also PLT-style jmp *GOT(%rip) */
+                    if (jr == 1 && !tablelike) {
+                        /* Not a table REX can read. Only a target taken from a global
+                         * slot (a function pointer or GOT entry: jmp *g(%rip), or
+                         * mov g(%rip),%r; jmp *%r in the same straight line) or a
+                         * constant (mov $addr,%r, as the C runtime does) is an
+                         * indirect tail call: call it and return its result.
+                         * Anything else may be a switch or a computed goto into this
+                         * function, and is refused. */
+                        int global = jo->kind == XO_MEM && jo->index == X86_NOREG && (jo->base == X86_RIP || jo->base == X86_NOREG);
+                        if (jo->kind == XO_REG)
+                            for (int k = nhist - 1; k >= 0; k--) {
+                                const X86Insn *w = &hist[k];
+                                if (w->op == X86_JMP || w->op == X86_JCC || w->op == X86_CALL) break;
+                                if (w->nops < 1 || w->ops[0].kind != XO_REG || w->ops[0].reg != jo->reg ||
+                                    w->op == X86_CMP || w->op == X86_TEST || w->op == X86_PUSH) continue;
+                                if (w->op == X86_MOV && w->ops[0].size == 8 && w->ops[1].kind == XO_MEM && w->ops[1].index == X86_NOREG &&
+                                    (w->ops[1].base == X86_RIP || w->ops[1].base == X86_NOREG)) global = 1;
+                                if (w->op == X86_MOV && w->ops[0].size >= 4 && w->ops[1].kind == XO_IMM) global = 1;   /* a constant address */
+                                break;
+                            }
+                        if (!global && !f->reachable) {
+                            /* a symbol-only helper (C runtime code): left unfollowed
+                             * as before; if main turns out to reach it, it is built
+                             * again as code that runs, and this refuses */
+                            f->lenient++;
+                            break;
+                        }
+                        if (!global) {
+                            rex_errf(err, errlen, REX_E401_INDIRECT_JMP, "%s: indirect jump at 0x%llx (its target is not a table REX can read)",
+                                     f->name, (unsigned long long)in->addr);
+                            goto out;
+                        }
+                        uint64_t *nt = realloc(f->tails, (size_t)(f->ntails + 1) * sizeof(*nt));
+                        if (!nt) goto oom;
+                        f->tails = nt; f->tails[f->ntails++] = in->addr;
+                        break;
+                    }
                     if (jr) {
                         rex_errf(err, errlen, REX_E401_INDIRECT_JMP, "%s: indirect jump at 0x%llx (%s)", f->name,
                                  (unsigned long long)in->addr,
@@ -221,7 +257,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrLi
             if (cfg_is_exit(prev, in)) { if (al_push(&leaders, next)) goto oom; break; }
             prevbuf = *in;
             prev = &prevbuf;
-            if (nhist == 4) { memmove(hist, hist + 1, 3 * sizeof(X86Insn)); nhist = 3; }
+            if (nhist == HIST) { memmove(hist, hist + 1, (HIST - 1) * sizeof(X86Insn)); nhist = HIST - 1; }
             hist[nhist++] = *in;
             a = next;
         }
@@ -503,6 +539,53 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
     /* (A PIE _start's lea main(%rip) may already have built it in phase 1.) A
      * symbol named main, below, still has the last word. */
     if (dyn_main && !p->main_addr && cfg_find_func(p, dyn_main) >= 0) p->main_addr = dyn_main;
+    /* Everything main reaches through direct calls and tail calls runs, so it
+     * must have been built. Phase 2 drops a helper it cannot build; if main
+     * reaches one, build it again for its error and fail with that. */
+    if (dyn_main) {
+        AddrList q = {0};
+        if (al_push(&q, dyn_main)) { cfg_free(p); free(calls.v); free(ft.v); return fail(err, errlen, "out of memory"); }
+        char *done = calloc(CFG_MAX_FUNCS, 1);
+        if (!done) { free(q.v); cfg_free(p); free(calls.v); free(ft.v); return fail(err, errlen, "out of memory"); }
+        for (int qi = 0; qi < q.n; qi++) {
+            uint64_t qa = q.v[qi];
+            int fi = cfg_find_func(p, qa);
+            if (fi < 0) {
+                CfgFunc tf; memset(&tf, 0, sizeof tf);
+                tf.addr = q.v[qi]; tf.reachable = 1;
+                snprintf(tf.name, sizeof(tf.name), "fn_%llx", (unsigned long long)q.v[qi]);
+                AddrList more = {0};
+                int brc = build_func(e, &tf, &more, &ft, err, errlen);
+                cfg_func_free(&tf); free(more.v);
+                if (brc) { free(done); free(q.v); cfg_free(p); free(calls.v); free(ft.v); return -1; }
+                /* builds now (it should not): the decompiler still lacks it */
+                free(done); free(q.v); cfg_free(p); free(calls.v); free(ft.v);
+                return fail(err, errlen, "fn_%llx: called from main but not built", (unsigned long long)qa);
+            }
+            if (done[fi]) continue;
+            done[fi] = 1;
+            if (p->funcs[fi].lenient) {
+                /* built leniently as a helper, but main reaches it: build it as code that runs */
+                CfgFunc tf; memset(&tf, 0, sizeof tf);
+                tf.addr = qa; tf.reachable = 1;
+                snprintf(tf.name, sizeof(tf.name), "%s", p->funcs[fi].name);
+                AddrList more = {0};
+                int brc = build_func(e, &tf, &more, &ft, err, errlen);
+                cfg_func_free(&tf); free(more.v);
+                if (!brc) brc = fail(err, errlen, "%s: an indirect jump is not followed", p->funcs[fi].name);
+                free(done); free(q.v); cfg_free(p); free(calls.v); free(ft.v); return -1;
+            }
+            const CfgFunc *cf = &p->funcs[fi];
+            for (int k = 0; k < cf->ninsns; k++) {
+                const X86Insn *x = &cf->insns[k];
+                if ((x->op == X86_CALL || (x->op == X86_JMP && cfg_is_tail(cf, x->addr))) && x->ops[0].kind == XO_REL &&
+                    !rex_elf_import_at(e, x->ops[0].target) && al_push(&q, x->ops[0].target)) {
+                    free(done); free(q.v); cfg_free(p); free(calls.v); free(ft.v); return fail(err, errlen, "out of memory");
+                }
+            }
+        }
+        free(done); free(q.v);
+    }
     /* Name functions from symbols; set main_addr if main is present. */
     for (int si = 0; si < e->nsh; si++) {
         const RexShdr *sec = &e->sh[si];

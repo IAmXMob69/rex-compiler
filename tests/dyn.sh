@@ -117,6 +117,15 @@ for cc in gcc clang; do
     $cc -O1 -no-pie -fno-pic -o "$T/neg_$cc" "$T/neg.c"
     ./rex match "$T/neg_$cc" -o "$T/neg_$cc.rex" >/dev/null 2>&1
 done
+# an indirect jmp REX cannot resolve (a computed goto) is refused with E401
+# and no file; it used to become a trap, and tosource wrote wrong code
+printf '%s\n' '__attribute__((noinline)) int cg(int x){ static void *L[] = { &&a, &&b, &&c, &&d }; int r = 0;' \
+    '  goto *L[x & 3]; a: r += 1; b: r += 2; c: r += 3; d: return r; }' 'int main(void){ return cg(1) + cg(2) * 10; }' > "$T/cg.c"
+for cc in gcc clang; do for o in O0 O2; do
+    $cc -$o -no-pie -fno-pic -o "$T/cg" "$T/cg.c"
+    set +e; ./rex tosource "$T/cg" -o "$T/cg.rex" 2> "$T/cg.err"; rc=$?; set -e
+    test $rc -ne 0 && grep -q "E401: fn_[0-9a-f]*: indirect jump" "$T/cg.err" && test ! -e "$T/cg.rex"
+done; done
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"

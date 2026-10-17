@@ -350,7 +350,15 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         if (in->ops[0].kind != XO_REL) {
             const CfgJumpTable *jt = NULL;
             for (int k = 0; k < l->cf->njt; k++) if (l->cf->jt[k].at == in->addr) jt = &l->cf->jt[k];
-            if (!jt) { emit(l, IR_TRAP); break; }  /* indirect tail jump (see cfg.c) */
+            if (!jt && cfg_is_tail(l->cf, in->addr)) {
+                /* indirect tail call (see cfg.c): call the target, return its result */
+                i = emit(l, IR_CALL); i->a = d;
+                i->b = ir_imm((int64_t)(in->addr + (uint64_t)in->size), 8);
+                l->flags = FL_NONE;
+                emit(l, IR_RET);
+                break;
+            }
+            if (!jt) { emit(l, IR_TRAP); break; }
             /* Table dispatch as a compare chain: index k -> targets[k]. The bounds
              * check before the jmp keeps the index in 0..n-1, so the last entry
              * is unconditional. Extra blocks are appended after the CFG blocks. */

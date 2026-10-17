@@ -32,6 +32,7 @@ typedef struct {
     uint64_t addr;
     char name[32];
     int reachable;          /* 1: reached from entry; 0: named only by a symbol */
+    int lenient;            /* symbol-only: indirect jumps left unfollowed (never in code that runs) */
     CfgJumpTable *jt;       /* recovered jump tables */
     int njt;
     X86Insn *insns;         /* sorted by address */
