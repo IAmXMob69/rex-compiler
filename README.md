@@ -264,7 +264,7 @@ Next (no schedule):
 
 1. PE imports and relocations (sections already parse; imports, relocs, TLS refused).
 2. Fuller x86-64: SSE/vector code (now `E200`), string ops, `bt*`, `cmpxchg`, PIC/PLT calls, 8/16-bit `div`.
-3. Optimized gcc/clang code. Done: non-PIE jump tables, `cltd` and 32-bit `idiv`, unsigned `div`/mod, register variables and exact C widths, global and stack arrays (`gmem`/`fr` blocks), memory operands on `add`/`cmp`/`imul`. Measured on `bench/game` (gcc+clang, -O0/-O1/-O2): `match` 26/36 (was 6/36); every remaining miss is SSE (`E200`). Next: `&&`/`||` chains and rotated loops as source shapes, struct-array fields, named arrays, dynamic glibc samples (0/36), `.eh_frame` seeds.
+3. Optimized gcc/clang code. Done: non-PIE jump tables, `cltd` and 32-bit `idiv`, unsigned `div`/mod, register variables and exact C widths, global and stack arrays (`gmem`/`fr` blocks), memory operands on `add`/`cmp`/`imul`. Measured on `bench/game` (gcc+clang, -O0/-O1/-O2): `match` 26/36 (was 6/36); every remaining miss is SSE (`E200`). Phase 8: `&&`/`||` chains fold into one condition, loops that exit at the bottom print as `do { } while`, a guard with the same condition becomes `while`. Next: proving gcc's loop guards equal to the loop condition (most rotated loops still print as `if (G) { do { } while (C); }`), struct-array fields, named arrays, dynamic glibc samples (0/36), `.eh_frame` seeds.
 4. PIE / shared objects / relocations.
 5. Later: Mach-O, ARM64, RISC-V.
 
