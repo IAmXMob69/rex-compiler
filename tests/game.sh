@@ -45,6 +45,11 @@ if command -v clang >/dev/null 2>&1; then
     # library function is dropped instead of failing the whole program.
     build clang O2 collide
     ./rex match "$T/collide_clang_O2" -o "$T/c2.rex" >/dev/null
+    # clang -O2 entities: defensive pin/spill temporaries that are never read are
+    # dropped, so the recovered main stays under REX's 64 local-name cap.
+    build clang O2 entities
+    ./rex match "$T/entities_clang_O2" -o "$T/en2.rex" >/dev/null
+    test "$(awk '/^fn main\(/{f=1} f&&/^    let (v|w|x)[0-9]+ = 0;/{c++} f&&/^}/{print c; exit}' "$T/en2.rex")" -le 64
     # clang -O0: memory operands on imul/add/cmp and movslq from memory
     for s in tilemap statemachine entities; do
         build clang O0 $s

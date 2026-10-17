@@ -2143,11 +2143,130 @@ static void foreign_args(D *d) {
     }
 }
 
+/* A spill/pin site may stash a register in an x temporary whose value is then
+ * recomputed inline, leaving the temporary assigned but never read. Dropping
+ * those dead temporaries keeps recovered functions under REX's local-name cap
+ * and removes clutter. Only pure assignments (no call) are removed, so this is
+ * behavior-preserving. Operates on the already-emitted function text. */
+static int dt_tok(const char *buf, const char *p, int *num) {
+    if (*p != 'x') return 0;
+    char before = p == buf ? 0 : p[-1];
+    if ((before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') ||
+        (before >= '0' && before <= '9') || before == '_') return 0;
+    const char *q = p + 1;
+    if (!(*q >= '0' && *q <= '9')) return 0;
+    int n = 0;
+    while (*q >= '0' && *q <= '9') { n = n * 10 + (*q - '0'); q++; }
+    char after = *q;
+    if ((after >= 'a' && after <= 'z') || (after >= 'A' && after <= 'Z') || after == '_') return 0;
+    *num = n;
+    return (int)(q - p);
+}
+/* true if the RHS text contains a call (an identifier immediately before '('). */
+static int dt_has_call(const char *s, const char *end) {
+    for (const char *p = s; p < end; p++)
+        if (*p == '(' && p > s) {
+            char c = p[-1];
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') return 1;
+        }
+    return 0;
+}
+static char *strip_dead_temps(const char *in) {
+    size_t len = strlen(in);
+    char *buf = malloc(len + 1);
+    if (!buf) return NULL;
+    memcpy(buf, in, len + 1);
+    enum { CAP = 4096 };
+    int *reads = malloc(CAP * sizeof(int));
+    int *defs = malloc(CAP * sizeof(int));
+    int *decl = malloc(CAP * sizeof(int));
+    if (!reads || !defs || !decl) { free(reads); free(defs); free(decl); return buf; }
+    for (int again = 1; again;) {
+        again = 0;
+        size_t blen = strlen(buf);
+        for (int i = 0; i < CAP; i++) { reads[i] = 0; defs[i] = 0; decl[i] = 0; }
+        /* Walk lines, classifying each x token as a definition (assignment LHS
+         * or a `let` declaration) or a read. */
+        char *line = buf;
+        while (line && *line) {
+            char *nl = strchr(line, '\n');
+            char *lend = nl ? nl : buf + blen;
+            char *s = line; while (*s == ' ' || *s == '\t') s++;
+            int lhs = -1; char *rhs_start = NULL;
+            if (!strncmp(s, "let ", 4)) {
+                int num; int w = dt_tok(buf, s + 4, &num);
+                if (w && num < CAP) { decl[num]++; }
+            } else {
+                int num; int w = dt_tok(buf, s, &num);
+                if (w && num < CAP) {
+                    char *after = s + w; while (*after == ' ') after++;
+                    if (after[0] == '=' && after[1] == ' ') { lhs = num; defs[num]++; rhs_start = after + 2; }
+                }
+            }
+            /* count reads: every x token in the value part of the line. For a
+             * `let NAME = init;` declaration scan the initializer (so a temp
+             * read there counts) but not the declared NAME itself. */
+            char *scan = rhs_start ? rhs_start : s;
+            if (!strncmp(s, "let ", 4)) {
+                char *eq = s + 4;
+                while (eq < lend && !(eq[0] == '=' && eq[1] == ' ')) eq++;
+                scan = eq < lend ? eq + 2 : lend;
+            }
+            for (char *p = scan; p < lend;) {
+                int num, w;
+                if ((w = dt_tok(buf, p, &num)) && num < CAP) { reads[num]++; p += w; }
+                else p++;
+            }
+            (void)lhs;
+            line = nl ? nl + 1 : NULL;
+        }
+        /* Rebuild the buffer, dropping lines that define or declare a temp with
+         * zero reads (and a pure RHS). */
+        char *out = malloc(blen + 1);
+        if (!out) break;
+        size_t oi = 0;
+        line = buf;
+        while (line && *line) {
+            char *nl = strchr(line, '\n');
+            char *lend = nl ? nl : buf + blen;
+            size_t llen = (size_t)(lend - line) + (nl ? 1 : 0);
+            char *s = line; while (*s == ' ' || *s == '\t') s++;
+            int drop = 0;
+            if (!strncmp(s, "let ", 4)) {
+                int num; int w = dt_tok(buf, s + 4, &num);
+                if (w && num < CAP && reads[num] == 0 && defs[num] > 0) drop = 1;
+            } else {
+                int num; int w = dt_tok(buf, s, &num);
+                if (w && num < CAP) {
+                    char *after = s + w; while (*after == ' ') after++;
+                    if (after[0] == '=' && after[1] == ' ' && reads[num] == 0) {
+                        char *semi = lend; while (semi > after && *semi != ';') semi--;
+                        if (!dt_has_call(after + 2, semi)) drop = 1;
+                    }
+                }
+            }
+            if (drop) again = 1;
+            else { memcpy(out + oi, line, llen); oi += llen; }
+            line = nl ? nl + 1 : NULL;
+        }
+        out[oi] = 0;
+        free(buf);
+        buf = out;
+    }
+    free(reads); free(defs); free(decl);
+    return buf;
+}
+
 static void decompile_fun(D *d, Fun *fi) {
     if (fi->kind == 1 || fi->kind == 3) return;
     const IrFunc *f = NULL;
     for (int i = 0; i < d->m->nfuncs; i++) if (d->m->funcs[i].addr == fi->addr) { f = &d->m->funcs[i]; break; }
     if (!f) return;
+
+    FILE *dt_real = d->out;
+    char *dt_buf = NULL; size_t dt_len = 0;
+    FILE *dt_m = open_memstream(&dt_buf, &dt_len);
+    if (dt_m) d->out = dt_m;
 
     /* reset env */
     for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
@@ -2218,6 +2337,13 @@ static void decompile_fun(D *d, Fun *fi) {
     }
     g_free(&g);
     fprintf(d->out, "}\n\n");
+    if (dt_m) {
+        fclose(dt_m);
+        d->out = dt_real;
+        char *clean = strip_dead_temps(dt_buf);
+        fputs(clean ? clean : dt_buf, d->out);
+        free(clean); free(dt_buf);
+    }
 }
 
 int rex_decompile(const char *inpath, const char *outpath, int verbose) {
