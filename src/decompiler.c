@@ -2706,6 +2706,9 @@ static void decompile_fun(D *d, Fun *fi) {
         if (d->foreign) {
             /* The passes below do not reset the compare snapshot, so save it and
              * put it back: the trial must leave their input exactly as it was. */
+            /* A failure an earlier function already recorded must survive the trial. */
+            int sv_fail = g_struct_fail;
+            const char *sv_fn = g_struct_fail_fn;
             int sv_snap = d->cmp_snap;
             Ex sv_a = { NULL }, sv_b = { NULL };
             if (sv_snap) { sv_a = ex(d->cmpa.s); sv_b = ex(d->cmpb.s); }
@@ -2721,7 +2724,7 @@ static void decompile_fun(D *d, Fun *fi) {
             if (tm) { d->out = tm; structure(d, f, &g, 0, -1, NULL, 1, 0); fclose(tm); d->out = sv; }
             free(tb);
             if (g_struct_fail && dispatch_safe(f)) dispatch = 1;
-            g_struct_fail = 0;
+            g_struct_fail = sv_fail; g_struct_fail_fn = sv_fn;
             d->vused = 0;
             if (d->cmp_snap) { ex_free(d->cmpa); ex_free(d->cmpb); }
             d->cmp_snap = sv_snap; d->cmpa = sv_a; d->cmpb = sv_b;
