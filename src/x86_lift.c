@@ -405,6 +405,7 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
          * value env. Only moves and the xor-self zero are modeled. */
         const X86Operand *o0 = in->nops > 0 ? &in->ops[0] : NULL;
         const X86Operand *o1 = in->nops > 1 ? &in->ops[1] : NULL;
+        const X86Operand *o2 = in->nops > 2 ? &in->ops[2] : NULL;
         switch (in->cc) {
         case SSE_ZERO: {
             int n = o0->reg;
@@ -458,6 +459,52 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
             int n = o1->reg, w = o0->size;
             if (o0->kind == XO_MEM) { IrOperand m = conv(l, o0); m.width = w; i = emit(l, IR_STORE); i->dst = m; i->a = ir_reg(16 + n, w); }
             else { wrote(l, ir_reg(o0->reg, w)); i = emit(l, IR_MOV); i->dst = ir_reg(o0->reg, w); i->a = ir_reg(16 + n, w); if (w == 4) zext32(l, ir_reg(o0->reg, 4)); }
+            break;
+        }
+        case SSE_PADDD: case SSE_PSUBD: case SSE_PAND: case SSE_POR: case SSE_PXOR2:
+        case SSE_PCMPEQB: case SSE_PCMPEQW: case SSE_PCMPEQD:
+        case SSE_PCMPGTB: case SSE_PCMPGTW: case SSE_PCMPGTD:
+        case SSE_PUNPCKLBW: case SSE_PUNPCKLWD: case SSE_PUNPCKLDQ: case SSE_PUNPCKLQDQ:
+        case SSE_PUNPCKHBW: case SSE_PUNPCKHWD: case SSE_PUNPCKHDQ: case SSE_PUNPCKHQDQ: {
+            int d = o0->reg, sr = o1->reg, vop = 0, lane = 8;
+            switch (in->cc) {
+            case SSE_PADDD: vop = IR_V_ADD; lane = 4; break;
+            case SSE_PSUBD: vop = IR_V_SUB; lane = 4; break;
+            case SSE_PAND:  vop = IR_V_AND; break;
+            case SSE_POR:   vop = IR_V_OR;  break;
+            case SSE_PXOR2: vop = IR_V_XOR; break;
+            case SSE_PCMPEQB: vop = IR_V_CMPEQ; lane = 1; break;
+            case SSE_PCMPEQW: vop = IR_V_CMPEQ; lane = 2; break;
+            case SSE_PCMPEQD: vop = IR_V_CMPEQ; lane = 4; break;
+            case SSE_PCMPGTB: vop = IR_V_CMPGT; lane = 1; break;
+            case SSE_PCMPGTW: vop = IR_V_CMPGT; lane = 2; break;
+            case SSE_PCMPGTD: vop = IR_V_CMPGT; lane = 4; break;
+            case SSE_PUNPCKLBW: vop = IR_V_UNPCKL; lane = 1; break;
+            case SSE_PUNPCKLWD: vop = IR_V_UNPCKL; lane = 2; break;
+            case SSE_PUNPCKLDQ: vop = IR_V_UNPCKL; lane = 4; break;
+            case SSE_PUNPCKLQDQ: vop = IR_V_UNPCKL; lane = 8; break;
+            case SSE_PUNPCKHBW: vop = IR_V_UNPCKH; lane = 1; break;
+            case SSE_PUNPCKHWD: vop = IR_V_UNPCKH; lane = 2; break;
+            case SSE_PUNPCKHDQ: vop = IR_V_UNPCKH; lane = 4; break;
+            case SSE_PUNPCKHQDQ: vop = IR_V_UNPCKH; lane = 8; break;
+            }
+            i = emit(l, IR_VEC); i->vop = vop;
+            i->dst = ir_reg(16 + d, 8); i->dst.width = lane;
+            i->a = ir_reg(16 + d, 8); i->b = ir_reg(16 + sr, 8);
+            break;
+        }
+        case SSE_PSHUFD: {
+            int d = o0->reg, sr = o1->reg;
+            i = emit(l, IR_VEC); i->vop = IR_V_SHUFD;
+            i->dst = ir_reg(16 + d, 8); i->dst.width = 4;
+            i->a = ir_reg(16 + sr, 8); i->b = ir_imm(o2->imm & 0xff, 1);
+            break;
+        }
+        case SSE_PSRLQ: case SSE_PSLLQ: {
+            int d = o0->reg;
+            i = emit(l, IR_VEC); i->vop = in->cc == SSE_PSRLQ ? IR_V_SRLQ : IR_V_SLLQ;
+            i->dst = ir_reg(16 + d, 8); i->dst.width = 8;
+            i->a = ir_reg(16 + d, 8); i->b = ir_imm(o1->imm & 0xff, 1);
             break;
         }
         default: lfail(l, "SSE form not supported"); break;

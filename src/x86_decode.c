@@ -75,6 +75,7 @@ static void set2(X86Insn *in, X86Opcode op, X86Operand a, X86Operand b) {
     in->op = op; in->nops = 2; in->ops[0] = a; in->ops[1] = b;
 }
 static void set1(X86Insn *in, X86Opcode op, X86Operand a) { in->op = op; in->nops = 1; in->ops[0] = a; }
+static void set3(X86Insn *in, X86Opcode op, X86Operand a, X86Operand b, X86Operand cc) { in->op = op; in->nops = 3; in->ops[0] = a; in->ops[1] = b; in->ops[2] = cc; }
 
 static X86Operand rel_op(int64_t d) {
     X86Operand o = {0};
@@ -142,10 +143,62 @@ static int decode_sse(Rd *r, Ctx *c, X86Insn *out, unsigned b2, int o66, int f3)
             if (e.kind != XO_MEM) return -1;
             out->cc = SSE_STOREQ; set2(out, X86_SSE, e, xr); return 1;
         }
-        if (b2 == 0xef) {           /* pxor: only the self-zero idiom */
+        if (b2 == 0xef) {           /* pxor: self-zero idiom, else two-register xor */
             e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
-            if (e.kind != XO_MEM && e.reg == c->reg) { out->cc = SSE_ZERO; set1(out, X86_SSE, xr); return 1; }
-            return -1;
+            if (e.kind == XO_MEM) return -1;
+            e.xmm = 1; e.size = 16;
+            if (e.reg == c->reg) { out->cc = SSE_ZERO; set1(out, X86_SSE, xr); return 1; }
+            out->cc = SSE_PXOR2; set2(out, X86_SSE, xr, e); return 1;
+        }
+        {
+            /* two-register packed integer lanes (reg,reg only) */
+            int sub = -1;
+            switch (b2) {
+            case 0xfe: sub = SSE_PADDD; break;
+            case 0xfa: sub = SSE_PSUBD; break;
+            case 0xdb: sub = SSE_PAND;  break;
+            case 0xeb: sub = SSE_POR;   break;
+            case 0x74: sub = SSE_PCMPEQB; break;
+            case 0x75: sub = SSE_PCMPEQW; break;
+            case 0x76: sub = SSE_PCMPEQD; break;
+            case 0x64: sub = SSE_PCMPGTB; break;
+            case 0x65: sub = SSE_PCMPGTW; break;
+            case 0x66: sub = SSE_PCMPGTD; break;
+            case 0x60: sub = SSE_PUNPCKLBW; break;
+            case 0x61: sub = SSE_PUNPCKLWD; break;
+            case 0x62: sub = SSE_PUNPCKLDQ; break;
+            case 0x6c: sub = SSE_PUNPCKLQDQ; break;
+            case 0x68: sub = SSE_PUNPCKHBW; break;
+            case 0x69: sub = SSE_PUNPCKHWD; break;
+            case 0x6a: sub = SSE_PUNPCKHDQ; break;
+            case 0x6d: sub = SSE_PUNPCKHQDQ; break;
+            }
+            if (sub >= 0) {
+                e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+                if (e.kind == XO_MEM) return -1;   /* only register sources are modeled */
+                e.xmm = 1; e.size = 16;
+                out->cc = sub; set2(out, X86_SSE, xr, e); return 1;
+            }
+        }
+        if (b2 == 0x70) {           /* pshufd imm8, src, dst (reg only) */
+            e = modrm(r, c, 16); xr = xmm_op(c->reg, 16);
+            if (e.kind == XO_MEM) return -1;
+            e.xmm = 1; e.size = 16;
+            int64_t im = get8(r);
+            out->cc = SSE_PSHUFD; set3(out, X86_SSE, xr, e, imm_op(im, 1)); return 1;
+        }
+        if (b2 == 0x73) {           /* psrlq/psllq imm8, xmm (group 14) */
+            if (r->i >= r->n) return -1;
+            unsigned m = r->p[r->i];   /* peek modrm to read the extension */
+            int ext = (m >> 3) & 7;
+            e = modrm(r, c, 16);
+            if (e.kind == XO_MEM) return -1;
+            xr = xmm_op(e.reg, 16);
+            int64_t im = get8(r);
+            if (ext == 2) out->cc = SSE_PSRLQ;
+            else if (ext == 6) out->cc = SSE_PSLLQ;
+            else return -1;
+            set2(out, X86_SSE, xr, imm_op(im, 1)); return 1;
         }
         return 0;
     }

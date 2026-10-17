@@ -51,7 +51,16 @@ enum {
     SSE_LOADQ,    /* dst xmm = zext [mem] (low 8 bytes, high zeroed) */
     SSE_STOREQ,   /* [mem] = src xmm (low 8 bytes) */
     SSE_MOVD_TOX, /* dst xmm = zext src r/m (4 or 8 bytes) */
-    SSE_MOVD_FROMX/* dst r/m = src xmm (low 4 or 8 bytes) */
+    SSE_MOVD_FROMX,/* dst r/m = src xmm (low 4 or 8 bytes) */
+    /* packed integer lanes: dst xmm OP= src xmm (or imm). ops are dst, src[, imm] */
+    SSE_PADDD, SSE_PSUBD,
+    SSE_PAND, SSE_POR, SSE_PXOR2,     /* PXOR2: pxor of two distinct regs */
+    SSE_PCMPEQB, SSE_PCMPEQW, SSE_PCMPEQD,
+    SSE_PCMPGTB, SSE_PCMPGTW, SSE_PCMPGTD,
+    SSE_PSHUFD,                        /* ops: dst, src, imm (control byte) */
+    SSE_PSRLQ, SSE_PSLLQ,              /* ops: dst, imm (shift count) */
+    SSE_PUNPCKLBW, SSE_PUNPCKLWD, SSE_PUNPCKLDQ, SSE_PUNPCKLQDQ,
+    SSE_PUNPCKHBW, SSE_PUNPCKHWD, SSE_PUNPCKHDQ, SSE_PUNPCKHQDQ
 };
 
 typedef struct {

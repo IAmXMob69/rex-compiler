@@ -51,6 +51,7 @@ typedef enum {
     IR_POP,     /* dst = [sp]; sp += width */
     IR_SYSCALL, /* platform call, registers per front end */
     IR_TRAP,    /* never reached (after a process exit) */
+    IR_VEC,     /* packed SIMD lane op; vop selects it, dst.width = lane size */
     IR_OP_COUNT
 } IrOp;
 
@@ -62,10 +63,25 @@ typedef enum {
     IR_CC_COUNT
 } IrCond;
 
+/* Packed SIMD operations for IR_VEC. The xmm register is a low/high 64-bit
+ * pseudo-register pair (16+n low, 32+n high); IR_VEC operands name the low-half
+ * register of each xmm, and the handler reads and writes both halves. dst.width
+ * is the lane size in bytes (1,2,4,8); b is an immediate for shuffles/shifts. */
+typedef enum {
+    IR_V_NONE = 0,
+    IR_V_ADD, IR_V_SUB,        /* per-lane add/sub, wrap at the lane width */
+    IR_V_AND, IR_V_OR, IR_V_XOR,
+    IR_V_CMPEQ, IR_V_CMPGT,    /* per-lane mask; CMPGT is signed */
+    IR_V_SHUFD,                /* dword shuffle, b.imm = control byte */
+    IR_V_UNPCKL, IR_V_UNPCKH,  /* interleave low/high lanes of a and b */
+    IR_V_SRLQ, IR_V_SLLQ,      /* logical shift of each 64-bit lane, b.imm = count */
+} IrVecOp;
+
 typedef struct {
     IrOp op;
     IrCond cc;
     IrOperand dst, a, b;   /* call: a = target, b = return address */
+    int vop;            /* IR_VEC: an IrVecOp */
     uint64_t origin;    /* source address or line, 0 if none */
 } IrInsn;
 

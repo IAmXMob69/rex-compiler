@@ -116,9 +116,16 @@ grep -q 'acted differently' "$T/e.err" && grep -q 'E501' "$T/e.err"
 # unknown command: plain reply pointing at help
 ! ./rex frobnicate 2> "$T/u.err"
 grep -q "I don't know the command 'frobnicate'. Type \`rex help\`" "$T/u.err"
-# vector code stays an explicit refusal
+# packed-integer SSE: gcc -O2 vectorizes the entity position update with
+# paddd + pshufd; the recovered lanes must match the real CPU.
 build gcc O2 entities
-! ./rex decompile "$T/entities_gcc_O2" -o "$T/e.rex" 2> "$T/e.err"
-grep -q 'E200' "$T/e.err"
+./rex match "$T/entities_gcc_O2" -o "$T/eg2.rex" >/dev/null
+# packed-integer SSE differential test: every packed op (paddd/psubd, pand/por/
+# pxor, pcmpeq[bwd]/pcmpgt[bwd], punpck[lh]{bw,wd,dq,qdq}, pshufd immediates,
+# psrlq/psllq) is computed on the real CPU and by a plain-C per-lane reference
+# over edge and random vectors; main returns nonzero on any byte mismatch, so
+# this match stays green only if the recovered lanes equal the real CPU.
+gcc -O0 $G -o "$T/ssecheck" tests/ssecheck.c
+./rex match "$T/ssecheck" -o "$T/ssecheck.rex" >/dev/null
 rm -rf "$T"
 echo "game: ok"

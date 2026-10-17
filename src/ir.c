@@ -131,7 +131,7 @@ static const char *opnames[IR_OP_COUNT] = {
     "neg", "not", "zext", "sext",
     "cmp", "test", "setcc", "cmov",
     "jmp", "br", "call", "ret",
-    "push", "pop", "syscall", "trap",
+    "push", "pop", "syscall", "trap", "vec",
 };
 static const char *ccnames[IR_CC_COUNT] = {
     "", "eq", "ne", "lt", "le", "gt", "ge", "ult", "ule", "ugt", "uge", "neg", "pos",

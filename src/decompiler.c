@@ -232,6 +232,14 @@ static int mentions_v(const char *s, const char *vn) {
 }
 static void setr(D *d, int r, Ex v) {
     if (r >= 16 && r < 48) {
+        /* long packed-lane expressions are spilled to a temporary so chained
+         * SSE ops do not grow without bound. */
+        if (d->foreign && strlen(v.s) > 400) {
+            char bb[2048];
+            int k = d->nx++;
+            emit(d, d->depth, "x%d = %s;", k, bare(v.s, bb, sizeof bb));
+            ex_free(v); v = exf("x%d", k);
+        }
         if (d->xhas[r - 16]) ex_free(d->xreg[r - 16]);
         d->xreg[r - 16] = v; d->xhas[r - 16] = 1;
         return;
@@ -825,11 +833,120 @@ static void store_ex(D *d, const IrInsn *in, Ex src, int src_imm, int depth) {
     ex_free(dst); ex_free(src);
 }
 
+/* --- packed SIMD lanes (IR_VEC) ---------------------------------------------
+ * An xmm register is a low/high 64-bit pseudo-register pair; each 64-bit half
+ * holds 8/w lanes of width w bytes. These helpers build the REX expression for
+ * a lane and reassemble a half from lanes, so a packed op becomes exact 64-bit
+ * integer arithmetic that round-trips through the REX compiler. */
+static Ex v_mask(Ex e, int w) {
+    if (w >= 8) return e;
+    return ex_bin("&", e, exf("%llu", (1ULL << (8 * w)) - 1));
+}
+static Ex v_lane(const char *h, int w, int i) {
+    int sh = 8 * w * i;
+    Ex e = sh ? ex_bin(">>", ex(h), exf("%d", sh)) : ex(h);
+    return v_mask(e, w);
+}
+static Ex v_sext(Ex e, int w) {
+    if (w >= 8) return e;
+    int s = 64 - 8 * w;
+    return ex_bin(">>", ex_bin("<<", e, exf("%d", s)), exf("%d", s));
+}
+static Ex v_place(Ex v, int w, int i) {
+    int sh = 8 * w * i;
+    return sh ? ex_bin("<<", v, exf("%d", sh)) : v;
+}
+static char *v_half(D *d, int rg) { Ex e = getr(d, rg); char *s = strdup(e.s); ex_free(e); return s; }
+
+static void vec_op(D *d, const IrInsn *in) {
+    int vop = in->vop, w = in->dst.width, dn = in->dst.reg - 16;
+
+    if (vop == IR_V_AND || vop == IR_V_OR || vop == IR_V_XOR) {
+        const char *op = vop == IR_V_AND ? "&" : vop == IR_V_OR ? "|" : "^";
+        int an = in->a.reg - 16, bn = in->b.reg - 16;
+        Ex lo = ex_bin(op, getr(d, 16 + an), getr(d, 16 + bn));
+        Ex hi = ex_bin(op, getr(d, 32 + an), getr(d, 32 + bn));
+        setr(d, 16 + dn, lo); setr(d, 32 + dn, hi);
+        return;
+    }
+    if (vop == IR_V_SRLQ || vop == IR_V_SLLQ) {
+        int an = in->a.reg - 16, k = (int)(in->b.imm & 0xff);
+        for (int half = 0; half < 2; half++) {
+            int rg = half ? 32 : 16;
+            Ex h = getr(d, rg + an), r;
+            if (k >= 64) { ex_free(h); r = exf("0"); }
+            else if (vop == IR_V_SRLQ) r = ex_bin("&", ex_bin(">>", h, exf("%d", k)), exf("%llu", (1ULL << (64 - k)) - 1));
+            else r = ex_bin("<<", h, exf("%d", k));
+            setr(d, rg + dn, r);
+        }
+        return;
+    }
+    if (vop == IR_V_SHUFD) {
+        int an = in->a.reg - 16, imm = (int)in->b.imm;
+        char *lo = v_half(d, 16 + an), *hi = v_half(d, 32 + an);
+        const char *src[2] = { lo, hi };
+        for (int half = 0; half < 2; half++) {
+            Ex acc = {0}; int have = 0;
+            for (int k = 0; k < 2; k++) {
+                int sel = (imm >> (2 * (half * 2 + k))) & 3;
+                Ex dw = v_lane(src[sel >> 1], 4, sel & 1);
+                Ex pl = v_place(dw, 4, k);
+                acc = have ? ex_bin("|", acc, pl) : pl; have = 1;
+            }
+            setr(d, (half ? 32 : 16) + dn, acc);
+        }
+        free(lo); free(hi);
+        return;
+    }
+    if (vop == IR_V_UNPCKL || vop == IR_V_UNPCKH) {
+        int an = in->a.reg - 16, bn = in->b.reg - 16, srcrg = vop == IR_V_UNPCKL ? 16 : 32;
+        char *ah = v_half(d, srcrg + an), *bh = v_half(d, srcrg + bn);
+        int nper = 8 / w;
+        for (int half = 0; half < 2; half++) {
+            Ex acc = {0}; int have = 0;
+            for (int k = 0; k < nper; k++) {
+                int j = half * nper + k;
+                Ex lane = (j % 2 == 0) ? v_lane(ah, w, j / 2) : v_lane(bh, w, j / 2);
+                Ex pl = v_place(lane, w, k);
+                acc = have ? ex_bin("|", acc, pl) : pl; have = 1;
+            }
+            setr(d, (half ? 32 : 16) + dn, acc);
+        }
+        free(ah); free(bh);
+        return;
+    }
+    /* per-lane two-source arithmetic / compare */
+    {
+        int an = in->a.reg - 16, bn = in->b.reg - 16, nper = 8 / w;
+        unsigned long long m = (1ULL << (8 * w)) - 1;
+        for (int half = 0; half < 2; half++) {
+            int rg = half ? 32 : 16;
+            char *ah = v_half(d, rg + an), *bh = v_half(d, rg + bn);
+            Ex acc = {0}; int have = 0;
+            for (int i = 0; i < nper; i++) {
+                Ex la = v_lane(ah, w, i), lb = v_lane(bh, w, i), f;
+                switch (vop) {
+                case IR_V_ADD: f = v_mask(ex_bin("+", la, lb), w); break;
+                case IR_V_SUB: f = v_mask(ex_bin("-", la, lb), w); break;
+                case IR_V_CMPEQ: f = exf("((%s == %s) ? %llu : 0)", la.s, lb.s, m); ex_free(la); ex_free(lb); break;
+                case IR_V_CMPGT: { Ex sa = v_sext(la, w), sb = v_sext(lb, w); f = exf("((%s > %s) ? %llu : 0)", sa.s, sb.s, m); ex_free(sa); ex_free(sb); } break;
+                default: ex_free(la); ex_free(lb); f = exf("0"); break;
+                }
+                Ex pl = v_place(f, w, i);
+                acc = have ? ex_bin("|", acc, pl) : pl; have = 1;
+            }
+            setr(d, rg + dn, acc);
+            free(ah); free(bh);
+        }
+    }
+}
+
 static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
     d->depth = depth;
     if (is_prolog(in) || is_epilog(in)) return;
     switch (in->op) {
     case IR_NOP: case IR_TRAP: case IR_SYSCALL: break;
+    case IR_VEC: vec_op(d, in); break;
     case IR_PUSH: push(d, op_ex(d, &in->a)); break;
     case IR_POP:
         if (in->dst.kind == IR_O_REG) setr(d, in->dst.reg, pop(d));
