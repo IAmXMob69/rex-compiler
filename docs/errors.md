@@ -74,6 +74,11 @@ Each entry below is the plain sentence REX prints, then a one-line fix.
 - **E603** — The code I got back doesn't build, so I can't check it against the original.
   Fix: this is a decompile gap; read the source with `rex tosource`. The detail
   names the first line the compiler stopped at.
+- **E604** — The original program didn't finish within 20 seconds, so I had nothing to compare against.
+  `match`, `compare` and `--verify` run each program for at most 20 s. Not a
+  mismatch: the rebuilt program is not run. Exit status 92.
+  Fix: use `rex tosource` (or `rebuild`) without checking, and run the result
+  yourself.
 
 ## Not yet in the code
 

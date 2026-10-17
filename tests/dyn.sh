@@ -104,11 +104,12 @@ gcc -O1 -no-pie -fno-pic -o "$T/um" "$T/um.c"
 set +e; ./rex tosource "$T/um" -o "$T/um.rex" 2> "$T/um.err"; rc=$?; set -e
 test $rc -ne 0 && grep -q "E200" "$T/um.err" && test ! -s "$T/um.rex" -o ! -e "$T/um.rex"
 # match runs each program for at most 20 s: an original that never finishes
-# is reported in one line instead of hanging match
+# is E604 (exit 92) with its own plain line, not a mismatch (E601)
 printf '%s\n' 'volatile int z;' 'int main(void){ while (!z) ; return 0; }' > "$T/spin.c"
 gcc -O1 -no-pie -fno-pic -o "$T/spin" "$T/spin.c"
 set +e; ./rex match "$T/spin" -o "$T/spin.rex" 2> "$T/spin.err"; rc=$?; set -e
-test $rc -ne 0 && grep -q "did not finish in 20 s" "$T/spin.err"
+test $rc -eq 92 && grep -q "didn't finish within 20 seconds" "$T/spin.err" && grep -q "^E604: " "$T/spin.err"
+test $(wc -l < "$T/spin.err") -eq 2
 # a 32-bit compare with a negative immediate (cmp $-1,%esi) is a compare of
 # the masked register with 0xffffffff, not with -1 (which never held)
 printf '%s\n' '__attribute__((noinline)) int t(int a, int e){ a--; if (e == -1) { a += 4; a ^= 0x55; return a*5+3; } return 0; }' \

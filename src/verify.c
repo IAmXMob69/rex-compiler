@@ -45,8 +45,8 @@ int rex_verify_bins(const char *a, const char *b, char *err, size_t errlen, int 
     int sa, sb;
     if (run_capture(a, oa, sizeof(oa), &sa))
         return rex_errf(err, errlen, code, "could not run binaries");
-    if (sa == RUN_TIMEOUT)
-        return rex_errf(err, errlen, code, "the original did not finish in %d s, so there is nothing to compare", RUN_LIMIT_S);
+    if (sa == RUN_TIMEOUT)   /* not a mismatch: nothing was compared */
+        return rex_errf(err, errlen, REX_E604_NO_FINISH, "%s ran past %d s without exiting; the rebuilt program was not run", a, RUN_LIMIT_S);
     if (run_capture(b, ob, sizeof(ob), &sb))
         return rex_errf(err, errlen, code, "could not run binaries");
     if (sb == RUN_TIMEOUT)
