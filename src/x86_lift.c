@@ -411,7 +411,8 @@ IrModule *x86_lift(const CfgProgram *p, char *err, size_t errlen) {
         int *out_fl = calloc((size_t)cf->nblocks, sizeof(int));
         if (!out_fl) { snprintf(err, errlen, "out of memory"); ir_module_free(m); return NULL; }
         L l = { f, 0, cf, NULL, FL_NONE, {0}, err, errlen, 0, 0 };
-        for (int b = 0; b < cf->nblocks; b++) {
+        int dropped = 0;
+        for (int b = 0; b < cf->nblocks && !dropped; b++) {
             const CfgBlock *bl = &cf->blocks[b];
             l.block = b;
             l.bfirst = bl->first;
@@ -440,11 +441,18 @@ IrModule *x86_lift(const CfgProgram *p, char *err, size_t errlen) {
                 l.in = &cf->insns[idx];
                 const X86Insn *prev = idx > 0 && cf->insns[idx - 1].addr + (uint64_t)cf->insns[idx - 1].size == l.in->addr ? &cf->insns[idx - 1] : NULL;
                 lift_insn(&l, prev, k == bl->n - 1, b);
-                if (l.bad) { free(out_fl); ir_module_free(m); return NULL; }
+                if (l.bad) {
+                    /* A dead library function (named only by a symbol, never
+                     * reached from the entry) we cannot model is dropped, the
+                     * same as at CFG time. A reachable one is still fatal. */
+                    if (!cf->reachable) { dropped = 1; break; }
+                    free(out_fl); ir_module_free(m); return NULL;
+                }
             }
-            out_fl[b] = l.flags;
+            if (!dropped) out_fl[b] = l.flags;
         }
         free(out_fl);
+        if (dropped) { ir_func_drop_last(m); continue; }
         if (ir_link(f, err, errlen)) { ir_module_free(m); return NULL; }
     }
     return m;

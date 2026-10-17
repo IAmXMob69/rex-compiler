@@ -369,6 +369,7 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
         CfgFunc *f = &p->funcs[p->nfuncs];
         memset(f, 0, sizeof(*f));
         f->addr = a;
+        f->reachable = 1;
         if (a == e->entry) snprintf(f->name, sizeof(f->name), "start");
         else snprintf(f->name, sizeof(f->name), "fn_%llx", (unsigned long long)a);
         if (build_func(e, f, &calls, err, errlen)) { cfg_func_free(f); cfg_free(p); free(calls.v); return -1; }
@@ -392,6 +393,7 @@ int cfg_build(const RexElf *e, CfgProgram *p, char *err, size_t errlen) {
         CfgFunc *f = &p->funcs[p->nfuncs];
         memset(f, 0, sizeof(*f));
         f->addr = a;
+        f->reachable = 0;
         snprintf(f->name, sizeof(f->name), "fn_%llx", (unsigned long long)a);
         char tmperr[256];
         if (build_func(e, f, &syms, tmperr, sizeof(tmperr))) { cfg_func_free(f); continue; }

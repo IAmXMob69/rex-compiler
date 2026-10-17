@@ -94,6 +94,7 @@ typedef struct {
 IrModule *ir_module_new(void);
 void ir_module_free(IrModule *m);
 IrFunc *ir_func_add(IrModule *m, const char *name, uint64_t addr);
+void ir_func_drop_last(IrModule *m);
 int ir_block_add(IrFunc *f, uint64_t addr);            /* block id, -1 on failure */
 IrInsn *ir_emit(IrFunc *f, int block, IrOp op);        /* NULL on failure */
 

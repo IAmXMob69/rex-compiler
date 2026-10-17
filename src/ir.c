@@ -31,6 +31,16 @@ void ir_module_free(IrModule *m) {
     free(m);
 }
 
+/* Free the contents of the most-recently-added function and forget it.
+ * Used to abandon a dead library function the lifter cannot model. */
+void ir_func_drop_last(IrModule *m) {
+    if (!m || m->nfuncs <= 0) return;
+    IrFunc *f = &m->funcs[--m->nfuncs];
+    for (int b = 0; b < f->nblocks; b++) free(f->blocks[b].insns);
+    free(f->blocks);
+    memset(f, 0, sizeof(*f));
+}
+
 IrFunc *ir_func_add(IrModule *m, const char *name, uint64_t addr) {
     if (grow((void **)&m->funcs, &m->cap, m->nfuncs + 1, sizeof(IrFunc))) return NULL;
     IrFunc *f = &m->funcs[m->nfuncs++];
