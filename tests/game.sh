@@ -57,6 +57,24 @@ printf '%s\n' '.globl _start' '_start: mov $7,%ecx' ' mov $100,%eax' ' div %ecx'
 gcc -static -nostdlib -no-pie -o "$T/divrdx" "$T/divrdx.s"
 ! ./rex decompile "$T/divrdx" -o "$T/dr.rex" 2> "$T/dr.err"
 grep -q 'E302' "$T/dr.err"
+# && / || chains fold into one condition; tail-exit loops print as do-while
+for o in O0 O1; do
+    "gcc" "-$o" $G -o "$T/chains_$o" tests/chains.c
+    ./rex match "$T/chains_$o" -o "$T/ch_$o.rex" >/dev/null
+done
+grep -q ' && \| || ' "$T/ch_O0.rex"
+grep -q '} while (' "$T/ch_O1.rex"
+# E-code regressions: each refusal prints a plain line and its code
+asm() { printf '%s\n' '.globl _start' '_start:' "$@" ' mov %eax,%edi' ' mov $60,%eax' ' syscall' > "$T/e.s"; gcc -static -nostdlib -no-pie -o "$T/e" "$T/e.s"; }
+asm ' mov $7,%ecx' ' mov $100,%eax' ' xor %edx,%edx' ' div %cl'
+! ./rex rebuild "$T/e" -o "$T/e.re" 2> "$T/e.err"
+grep -q 'divide instruction' "$T/e.err" && grep -q 'E302' "$T/e.err"
+asm ' mov $1,%eax' ' shl $3,%ax'
+! ./rex rebuild "$T/e" -o "$T/e.re" 2> "$T/e.err"
+grep -q 'could not write a new binary' "$T/e.err" && grep -q 'E500' "$T/e.err"
+asm ' mov $39,%eax' ' syscall'
+! ./rex compare "$T/e" -o "$T/e.re" 2> "$T/e.err"
+grep -q 'did not match' "$T/e.err" && grep -q 'E501' "$T/e.err"
 # vector code stays an explicit refusal
 build gcc O2 entities
 ! ./rex decompile "$T/entities_gcc_O2" -o "$T/e.rex" 2> "$T/e.err"
