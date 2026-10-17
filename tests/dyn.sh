@@ -234,6 +234,13 @@ printf '%s\n' 'int main(int c, char **v){ unsigned char a = (unsigned char)(c + 
 gcc -O1 -no-pie -fno-pic -o "$T/mb" "$T/mb.c"
 set +e; ./rex tosource "$T/mb" -o "$T/mb.rex" 2> "$T/mb.err"; rc=$?; set -e
 test $rc -ne 0 && grep -q "8-bit one-operand mul" "$T/mb.err" && test ! -e "$T/mb.rex"
+# match runs both programs on several argv/stdin inputs and compares exit,
+# stdout and stderr byte for byte: a main that only differs when given
+# arguments (REX has no argv) is no longer a match
+printf '%s\n' 'int main(int c, char **v){ return c > 1 ? 5 : 0; }' > "$T/av.c"
+gcc -O1 -no-pie -fno-pic -o "$T/av" "$T/av.c"
+set +e; ./rex match "$T/av" -o "$T/av.rex" 2> "$T/av.err"; rc=$?; set -e
+test $rc -eq 89 && grep -q "E601: exit 5 vs exit 0 (args: 7, stdin: 2 bytes)" "$T/av.err"
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"

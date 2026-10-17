@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "rex_err.h"
@@ -13,48 +14,147 @@
 #include "ir.h"
 
 /* Each program gets this long: a rebuilt program that loops must not hang match. */
-enum { RUN_LIMIT_S = 20, RUN_TIMEOUT = -2 };
-static int run_capture(const char *bin, char *out, size_t outn, int *status) {
-    int p[2];
-    if (pipe(p)) return -1;
+enum { RUN_LIMIT_S = 20, RUN_TIMEOUT = -2, RUN_SIGNAL = 1000 };
+
+/* What a run did: exit status (or RUN_TIMEOUT, or RUN_SIGNAL + signal) and
+ * everything it wrote to stdout and to stderr, byte for byte. */
+typedef struct { int status; char *out, *errb; size_t nout, nerr; } Run;
+static void run_free(Run *r) { free(r->out); free(r->errb); memset(r, 0, sizeof *r); }
+
+static int slurp(int fd, char **buf, size_t *n) {
+    size_t cap = 4096, len = 0;
+    char *b = malloc(cap);
+    if (!b) return -1;
+    if (lseek(fd, 0, SEEK_SET) < 0) { free(b); return -1; }
+    for (;;) {
+        if (len == cap) { char *nb = realloc(b, cap * 2); if (!nb) { free(b); return -1; } b = nb; cap *= 2; }
+        ssize_t r = read(fd, b + len, cap - len);
+        if (r < 0) { free(b); return -1; }
+        if (r == 0) break;
+        len += (size_t)r;
+    }
+    *buf = b; *n = len;
+    return 0;
+}
+static int tmpfd(void) {
+    char t[] = "/tmp/rexrunXXXXXX";
+    int fd = mkstemp(t);
+    if (fd >= 0) unlink(t);
+    return fd;
+}
+
+/* The inputs a program is run with. Both programs see argv[0] "prog", so a
+ * path never makes them differ. Input 0 (no arguments, empty stdin) is the
+ * one every program gets; the others count only where the original gives the
+ * same result twice and finishes in time. */
+typedef struct { const char *args[4]; const char *in; size_t nin; } Input;
+static char g_bigin[8192];
+static Input g_inputs[] = {
+    { { NULL }, "", 0 },
+    { { "7", NULL }, "3\n", 2 },
+    { { "hello", "-x", "12345", NULL }, "hello world\n42 -7\nzz\n", 21 },
+    { { "0", NULL }, g_bigin, 0 },
+};
+enum { N_INPUTS = sizeof g_inputs / sizeof g_inputs[0] };
+static void inputs_init(void) {
+    if (g_inputs[3].nin) return;
+    size_t n = 0;
+    for (int k = 0; n + 16 < sizeof g_bigin; k++) n += (size_t)snprintf(g_bigin + n, sizeof g_bigin - n, "%d\n", k * 7919 % 10007 - 5000);
+    g_inputs[3].nin = n;
+}
+
+static int run_one(const char *bin, const Input *in, Run *r) {
+    memset(r, 0, sizeof *r);
+    int fi = tmpfd(), fo = tmpfd(), fe = tmpfd();
+    if (fi < 0 || fo < 0 || fe < 0) goto fail;
+    if (in->nin && write(fi, in->in, in->nin) != (ssize_t)in->nin) goto fail;
+    if (lseek(fi, 0, SEEK_SET) < 0) goto fail;
+    char *argv[6] = { "prog" };
+    int na = 1;
+    for (int k = 0; k < 4 && in->args[k]; k++) argv[na++] = (char *)in->args[k];
+    argv[na] = NULL;
     pid_t pid = fork();
-    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
+    if (pid < 0) goto fail;
     if (pid == 0) {
-        dup2(p[1], 1); dup2(p[1], 2); close(p[0]); close(p[1]);
+        dup2(fi, 0); dup2(fo, 1); dup2(fe, 2);
+        close(fi); close(fo); close(fe);
         alarm(RUN_LIMIT_S);                 /* a pending alarm survives exec */
-        execl(bin, bin, (char *)NULL);
+        execv(bin, argv);
         _exit(127);
     }
-    close(p[1]);
-    size_t n = 0;
-    for (;;) {
-        if (n + 1 >= outn) { char sink[256]; if (read(p[0], sink, sizeof(sink)) <= 0) break; continue; }
-        ssize_t r = read(p[0], out + n, outn - 1 - n);
-        if (r <= 0) break;
-        n += (size_t)r;
-    }
-    out[n] = 0;
-    close(p[0]);
-    int st = 0; waitpid(pid, &st, 0);
-    *status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) && WTERMSIG(st) == SIGALRM ? RUN_TIMEOUT : -1;
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0) goto fail;
+    r->status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) && WTERMSIG(st) == SIGALRM ? RUN_TIMEOUT
+              : WIFSIGNALED(st) ? RUN_SIGNAL + WTERMSIG(st) : -1;
+    if (slurp(fo, &r->out, &r->nout) || slurp(fe, &r->errb, &r->nerr)) { run_free(r); goto fail; }
+    close(fi); close(fo); close(fe);
     return 0;
+fail:
+    if (fi >= 0) close(fi);
+    if (fo >= 0) close(fo);
+    if (fe >= 0) close(fe);
+    return -1;
+}
+
+static int same_run(const Run *x, const Run *y) {
+    return x->status == y->status && x->nout == y->nout && x->nerr == y->nerr &&
+           !memcmp(x->out, y->out, x->nout) && !memcmp(x->errb, y->errb, x->nerr);
+}
+static void status_str(int st, char *b, size_t n) {
+    if (st >= RUN_SIGNAL) snprintf(b, n, "killed by signal %d", st - RUN_SIGNAL);
+    else snprintf(b, n, "exit %d", st);
+}
+static void input_str(const Input *in, char *b, size_t n) {
+    size_t k = (size_t)snprintf(b, n, "args:");
+    if (!in->args[0] && k < n) k += (size_t)snprintf(b + k, n - k, " none");
+    for (int i = 0; i < 4 && in->args[i] && k < n; i++) k += (size_t)snprintf(b + k, n - k, " %s", in->args[i]);
+    if (k < n) snprintf(b + k, n - k, ", stdin: %zu bytes", in->nin);
+}
+static size_t first_diff(const char *x, size_t nx, const char *y, size_t ny) {
+    size_t i = 0;
+    while (i < nx && i < ny && x[i] == y[i]) i++;
+    return i;
 }
 
 int rex_verify_bins(const char *a, const char *b, char *err, size_t errlen, int code) {
-    char oa[1 << 16], ob[1 << 16];
-    int sa, sb;
-    if (run_capture(a, oa, sizeof(oa), &sa))
-        return rex_errf(err, errlen, code, "could not run binaries");
-    if (sa == RUN_TIMEOUT)   /* not a mismatch: nothing was compared */
-        return rex_errf(err, errlen, REX_E604_NO_FINISH, "%s ran past %d s without exiting; the rebuilt program was not run", a, RUN_LIMIT_S);
-    if (run_capture(b, ob, sizeof(ob), &sb))
-        return rex_errf(err, errlen, code, "could not run binaries");
-    if (sb == RUN_TIMEOUT)
-        return rex_errf(err, errlen, code, "the rebuilt program did not finish in %d s (the original exits %d)", RUN_LIMIT_S, sa);
-    if (sa != sb)
-        return rex_errf(err, errlen, code, "exit %d vs %d", sa, sb);
-    if (strcmp(oa, ob))
-        return rex_errf(err, errlen, code, "stdout/stderr differ");
+    inputs_init();
+    for (int k = 0; k < N_INPUTS; k++) {
+        const Input *in = &g_inputs[k];
+        Run ra, rb;
+        if (run_one(a, in, &ra)) return rex_errf(err, errlen, code, "could not run binaries");
+        if (ra.status == RUN_TIMEOUT) {
+            run_free(&ra);
+            if (k == 0)   /* not a mismatch: nothing was compared */
+                return rex_errf(err, errlen, REX_E604_NO_FINISH, "%s ran past %d s without exiting; the rebuilt program was not run", a, RUN_LIMIT_S);
+            continue;     /* this input is not one the sample allows */
+        }
+        if (k > 0) {
+            /* only an input the original answers the same way twice is compared */
+            Run r2;
+            if (run_one(a, in, &r2)) { run_free(&ra); return rex_errf(err, errlen, code, "could not run binaries"); }
+            int same = same_run(&ra, &r2);
+            run_free(&r2);
+            if (!same) { run_free(&ra); continue; }
+        }
+        if (run_one(b, in, &rb)) { run_free(&ra); return rex_errf(err, errlen, code, "could not run binaries"); }
+        char ib[96], sa[32], sb[32];
+        input_str(in, ib, sizeof ib);
+        status_str(ra.status, sa, sizeof sa);
+        int rc = 0;
+        if (rb.status == RUN_TIMEOUT)
+            rc = rex_errf(err, errlen, code, "the rebuilt program did not finish in %d s (%s; the original: %s)", RUN_LIMIT_S, ib, sa);
+        else if (ra.status != rb.status) {
+            status_str(rb.status, sb, sizeof sb);
+            rc = rex_errf(err, errlen, code, "%s vs %s (%s)", sa, sb, ib);
+        } else if (ra.nout != rb.nout || memcmp(ra.out, rb.out, ra.nout))
+            rc = rex_errf(err, errlen, code, "stdout differs at byte %zu (%zu vs %zu bytes; %s)",
+                          first_diff(ra.out, ra.nout, rb.out, rb.nout), ra.nout, rb.nout, ib);
+        else if (ra.nerr != rb.nerr || memcmp(ra.errb, rb.errb, ra.nerr))
+            rc = rex_errf(err, errlen, code, "stderr differs at byte %zu (%zu vs %zu bytes; %s)",
+                          first_diff(ra.errb, ra.nerr, rb.errb, rb.nerr), ra.nerr, rb.nerr, ib);
+        run_free(&ra); run_free(&rb);
+        if (rc) return rc;
+    }
     return 0;
 }
 

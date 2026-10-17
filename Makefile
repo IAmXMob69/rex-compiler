@@ -47,6 +47,7 @@ unit:
 	$(CC) $(CFLAGS) -o /tmp/rex_test_pe tests/test_pe.c src/loader.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/ir.c && /tmp/rex_test_pe
 	$(CC) $(CFLAGS) -o /tmp/rex_test_x86 tests/test_x86.c src/x86_decode.c && /tmp/rex_test_x86
 	$(CC) $(CFLAGS) -o /tmp/rex_test_cpu tests/test_cpu_diff.c src/ir.c src/x86_decode.c && /tmp/rex_test_cpu
+	$(CC) $(CFLAGS) -o /tmp/rex_test_verify tests/test_verify.c src/verify.c src/loader.c src/elfread.c src/x86_decode.c src/cfg.c src/x86_lift.c src/ir.c && /tmp/rex_test_verify
 
 # rexcomp reads in.rex from its working directory; keep it out of the tree.
 RT = /tmp/rex-test
