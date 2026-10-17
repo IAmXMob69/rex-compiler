@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -2511,6 +2512,59 @@ int rex_recompile(const char *in, const char *out, int debug);
 int rex_decompile(const char *in, const char *out, int verbose);
 int rex_decompile_libcalls(char *name, size_t n);
 
+static int compile_to(const char *srcpath, const char *outbin);
+
+/* Build recovered source for a check. The compiler stops the process on its
+ * first error, so it runs in a child with its messages captured: a failure
+ * becomes one plain line and E603 with the first error's line and text, and
+ * the compiler's raw output never reaches the user. */
+static int compile_recovered(const char *src, const char *bin) {
+    char ep[] = "/tmp/rexcerrXXXXXX";
+    int efd = mkstemp(ep);
+    if (efd < 0) die("mkstemp");
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) die("fork");
+    if (pid == 0) {
+        dup2(efd, 2);
+        int nul = open("/dev/null", O_WRONLY);
+        if (nul >= 0) dup2(nul, 1);
+        _exit(compile_to(src, bin) ? 1 : 0);
+    }
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    char msg[200] = "it stopped before finishing"; int line = 0;
+    if (!ok) {
+        FILE *ef = fdopen(efd, "r"); efd = -1;
+        char buf[512];
+        if (ef) {
+            rewind(ef);
+            int first = 1;
+            while (fgets(buf, sizeof buf, ef)) {
+                buf[strcspn(buf, "\n")] = 0;
+                char *e = strstr(buf, "error: ");
+                if (e) {
+                    const char *p = strchr(buf, ':');
+                    if (p && p < e) line = atoi(p + 1);
+                    snprintf(msg, sizeof msg, "%.190s", e + 7);
+                    break;
+                }
+                if (first && !strncmp(buf, "rex: ", 5)) { snprintf(msg, sizeof msg, "%.190s", buf + 5); first = 0; }
+            }
+            fclose(ef);
+        }
+    }
+    if (efd >= 0) close(efd);
+    unlink(ep);
+    if (ok) return 0;
+    char err[512];
+    if (line) rex_errf(err, sizeof err, REX_E603_NOBUILD, "%s line %d: %s", src, line, msg);
+    else rex_errf(err, sizeof err, REX_E603_NOBUILD, "%s: %s", src, msg);
+    rex_refuse(err);
+    return REX_E603_NOBUILD;
+}
+
 /* The recovered source calls libc, which a rebuilt program cannot reach:
  * refuse the run with E602 instead of a confusing build error or mismatch. */
 static int refuse_libcalls(const char *out) {
@@ -2605,7 +2659,7 @@ int main(int argc, char **argv) {
         if ((rc = refuse_libcalls(out))) return rc;
         char tmp[] = "/tmp/rexverXXXXXX";
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
-        if (compile_to(out, tmp)) { unlink(tmp); return 1; }
+        if ((rc = compile_recovered(out, tmp))) { unlink(tmp); return rc; }
         char err[256];
         rc = rex_verify_bins(in, tmp, err, sizeof(err), REX_E601_VERIFY);
         if (rc) { unlink(tmp); rex_refuse(err); return rc; }
@@ -2645,7 +2699,7 @@ int main(int argc, char **argv) {
         /* Rebuild decompiled source and compare behavior to the original. */
         char tmp[] = "/tmp/rexverXXXXXX";
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
-        if (compile_to(out, tmp)) { unlink(tmp); return 1; }
+        if ((rc = compile_recovered(out, tmp))) { unlink(tmp); return rc; }
         char err[256];
         rc = rex_verify_bins(in, tmp, err, sizeof(err), REX_E601_VERIFY);
         unlink(tmp);

@@ -43,7 +43,8 @@ enum {
 
     REX_E600_DECOMPILE    = 600,
     REX_E601_VERIFY       = 601,
-    REX_E602_LIBCALL      = 602  /* match: calls a shared library */
+    REX_E602_LIBCALL      = 602, /* match: calls a shared library */
+    REX_E603_NOBUILD      = 603  /* match: recovered source does not compile */
 };
 
 static inline const char *rex_err_plain(int code) {
@@ -73,6 +74,7 @@ static inline const char *rex_err_plain(int code) {
     case REX_E502_PE_REBUILD:   return "I couldn't rebuild that Windows program correctly.";
     case REX_E600_DECOMPILE:    return "I couldn't turn this program back into readable code.";
     case REX_E601_VERIFY:       return "The code I got back acted differently from the original when I ran both.";
+    case REX_E603_NOBUILD:      return "The code I got back doesn't build, so I can't check it against the original.";
     case REX_E602_LIBCALL:      return "This program calls code from a shared library (like printf), and I can't rebuild those calls yet.";
     default:                    return "Something went wrong.";
     }

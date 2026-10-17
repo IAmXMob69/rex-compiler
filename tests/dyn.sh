@@ -40,6 +40,24 @@ gcc -O2 -no-pie -fno-pic -o "$T/rec2" "$T/rec.c"
 ! ./rex tosource "$T/rec2" -o "$T/rec2.rex" 2> "$T/rec2.err"
 grep -q "E402: fib" "$T/rec2.err"
 test ! -f "$T/rec2.rex"
+# -O0 struct code keeps a struct in an address-taken frame: its cells are
+# memory (*(fr + n)), stored to, never declared with let
+printf '%s\n' 'typedef struct{int a,b;long c;}S; long sum(S*s){return s->a+s->b+s->c;}' \
+    'int main(){S s={1,2,3};return (int)sum(&s);}' > "$T/st.c"
+for cc in gcc clang; do
+    $cc -O0 -no-pie -fno-pic -o "$T/st_$cc" "$T/st.c"
+    ./rex match "$T/st_$cc" -o "$T/st_$cc.rex" >/dev/null 2>&1
+done
+# recovered source that does not build is refused with one plain line and
+# E603 (exit 91); the compiler's own messages never reach the user
+printf '%s\n' 'static int sq(int x){return x*x;}' 'int (*volatile fp)(int) = sq;' \
+    'int main(void){return fp(3);}' > "$T/fp.c"
+gcc -O1 -no-pie -fno-pic -o "$T/fp" "$T/fp.c"
+set +e; ./rex match "$T/fp" -o "$T/fp.rex" > "$T/fp.out" 2> "$T/fp.err"; rc=$?; set -e
+test $rc -eq 91
+grep -q "doesn't build" "$T/fp.err" && grep -q "E603: .* line [0-9]*: " "$T/fp.err"
+test $(wc -l < "$T/fp.err") -eq 2
+! grep -q "aborting" "$T/fp.err" "$T/fp.out"
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"

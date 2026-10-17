@@ -68,6 +68,9 @@ Each entry below is the plain sentence REX prints, then a one-line fix.
 - **E602** — This program calls code from a shared library (like printf), and I can't rebuild those calls yet.
   Fix: read it with `rex tosource`; library calls show by name. `match` and
   `decompile --verify` refuse because the rebuilt program has no library to call.
+- **E603** — The code I got back doesn't build, so I can't check it against the original.
+  Fix: this is a decompile gap; read the source with `rex tosource`. The detail
+  names the first line the compiler stopped at.
 
 ## Not yet in the code
 
