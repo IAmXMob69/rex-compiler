@@ -109,8 +109,10 @@ Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex
 | E502 | recompile | I couldn't rebuild that Windows program correctly. | PE rebuild failed / not clean |
 | E600 | decompile | I couldn't turn this program back into readable code. | recovery failure (also printed as a comment when a function's CFG cannot be built) |
 | E601 | decompile | The code I got back acted differently from the original when I ran both. | `--verify` mismatch |
+| E604 | decompile | The original program didn't finish within 20 seconds, so I had nothing to compare against. | original timed out; the rebuilt program is not run (exit 92) |
+| E605 | decompile | This program calls a function through a pointer in a way I can't write in .rex yet. | no address-taken recovered function, or a target with 6 arguments (exit 93) |
 
-No silent partial output: a failure returns the code and prints the message. `--verify` on `recompile` / `decompile` runs both sides with no args and compares exit status plus combined stdout/stderr. `compare --ir` / `match --ir` also lift both sides and compare a normalized dump of `main` (identity `mov`, call return addresses, and rip displacements are stripped).
+No silent partial output: a failure returns the code and prints the message. `--verify` on `recompile` / `decompile` runs both sides on four inputs (no args; then argument and stdin sets the original answers the same way twice) and compares exit status, stdout and stderr byte for byte. `compare --ir` / `match --ir` also lift both sides and compare a normalized dump of `main` (identity `mov`, call return addresses, and rip displacements are stripped).
 
 ## ELF loader (`src/elfread.c`)
 
@@ -186,7 +188,7 @@ Present today (decoder + lift unless noted): the REX emission set, unsigned `div
 Next instruction groups, in rough leverage order for gcc/clang `-O0`/`-O1` output:
 
 1. Remaining `movzx`/`movsx` / `movsxd` forms; `cdqe`.
-2. More `imul` forms (one-operand full rdx:rax).
+2. Done: one-operand `mul`/`imul` (32/64-bit, rdx:rax); 8/16-bit forms are refused.
 4. String ops (`movs`, `stos`, `rep` prefixes) — likely refused with a clear error for a long time.
 5. `bt` / `bts` / `btr` / `btc`, `xchg`, `cmpxchg`, `xadd`.
 6. General rip-relative memory in more ops; PIC/PLT call shapes.
