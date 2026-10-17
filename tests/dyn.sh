@@ -34,12 +34,42 @@ printf '%s\n' 'int fib(int n){if(n<2)return n;return fib(n-1)+fib(n-2);}' \
 clang -O1 -no-pie -fno-pic -o "$T/rec" "$T/rec.c"
 ./rex match "$T/rec" -o "$T/rec.rex" >/dev/null 2>&1
 grep -q 'f[0-9]*(10)' "$T/rec.rex"
-# gcc -O2 fib needs a continue of an outer loop, which REX cannot spell. It must
-# refuse with E402 and write nothing, never print a copy-nested body that loops.
+# gcc -O2 fib needs a continue of an outer loop, which REX cannot spell, and
+# saves registers with push/pop: the dispatch fallback takes it once the stack
+# model shows every block sees the frame where the machine has it
 gcc -O2 -no-pie -fno-pic -o "$T/rec2" "$T/rec.c"
-! ./rex tosource "$T/rec2" -o "$T/rec2.rex" 2> "$T/rec2.err"
-grep -q "E402: fib" "$T/rec2.err"
-test ! -f "$T/rec2.rex"
+./rex match "$T/rec2" -o "$T/rec2.rex" >/dev/null 2>&1
+grep -q "st == " "$T/rec2.rex"
+# an irreducible loop with calls (callee-saved pushes) at every level
+printf '%s\n' '__attribute__((noinline)) int g(int x){ return x*3+1; }' \
+    '__attribute__((noinline)) int irr(int n, int m){' \
+    '    int s = 0, i = 0;' \
+    '    if (n & 1) goto mid;' \
+    'top:' \
+    '    s += g(i);' \
+    '    i++;' \
+    'mid:' \
+    '    s ^= g(s + m);' \
+    '    if (i < n) goto top;' \
+    '    if (s & 4) { i = 0; if (m-- > 0) goto mid; }' \
+    '    return s;' \
+    '}' \
+    '' \
+    'int main(void){ unsigned s=0; for(int n=0;n<12;n++) for(int m=-2;m<5;m++) s = s*31 + irr(n,m); return (int)(s % 251); }' > "$T/irr.c"
+for cc in gcc clang; do for o in O1 O2 Os; do
+    $cc -$o -no-pie -fno-pic -o "$T/irr" "$T/irr.c"
+    ./rex match "$T/irr" -o "$T/irr.rex" >/dev/null 2>&1
+done; done
+# the same, edited by hand (tests/stack): a frame block with sub/add rsp and an
+# rsp address matches; a cross-block pop outside the epilogue, an rsp read of a
+# pushed slot and a mid-function rsp shift are refused with E402, no file
+gcc -no-pie -o "$T/st_frame" tests/stack/frame.s
+./rex match "$T/st_frame" -o "$T/st_frame.rex" >/dev/null 2>&1
+for t in xpop slot shift; do
+    gcc -no-pie -o "$T/st_$t" tests/stack/$t.s
+    set +e; ./rex tosource "$T/st_$t" -o "$T/st_$t.rex" 2> "$T/st_$t.err"; rc=$?; set -e
+    test $rc -eq 146 && grep -q "E402: irr" "$T/st_$t.err" && test ! -e "$T/st_$t.rex"
+done
 # -O0 struct code keeps a struct in an address-taken frame: its cells are
 # memory (*(fr + n)), stored to, never declared with let
 printf '%s\n' 'typedef struct{int a,b;long c;}S; long sum(S*s){return s->a+s->b+s->c;}' \

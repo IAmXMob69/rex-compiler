@@ -2610,15 +2610,128 @@ static char *strip_dead_temps(const char *in) {
     return buf;
 }
 
+/* Stack-height model for the dispatch fallback. Each dispatch arm starts from
+ * nothing but the register variables, so the frame view every arm prints must
+ * match the machine's. Per block the model tracks the real stack height h
+ * (bytes below the entry rsp: push -8, pop +8, sub/add rsp,imm, a call nets 0)
+ * and D, the part of it the printer follows: it skips the prologue's sub rsp and
+ * keeps pushes on its value stack, so only add rsp,imm moves its rsp. An rsp
+ * operand at disp then prints as rsp+D+disp for a machine address h+disp, which
+ * is exact when h-D is one constant over the whole function (and equals the
+ * height rbp was set at, if rbp addresses the frame too). Joins must agree on
+ * (h, D); a return must leave h = 0; no frame access may touch a pushed slot.
+ * A pop of a value pushed in another block (an epilogue restoring a callee-saved
+ * register) is allowed only when nothing but pops, add rsp and the return
+ * follow, so the restored value is never read. Any other rsp write is unknown.
+ * Returns 1 when exact; dent (may be NULL) gets each block's entry D. */
+#define SM_UNSET (-(1LL << 40))
+static int stack_model(const D *d, const IrFunc *f, long long *dent) {
+    int n = f->nblocks, ok = 1;
+    if (n <= 0) return 1;
+    long long *eh = malloc((size_t)n * sizeof *eh), *ed = malloc((size_t)n * sizeof *ed);
+    int *work = malloc((size_t)n * sizeof *work);
+    long long slots[64]; int nsl = 0;              /* pushed slots, by real height */
+    long long acc_lo[256], acc_hi[256]; int nacc = 0;
+    if (!eh || !ed || !work) { free(eh); free(ed); free(work); return 0; }
+    for (int b = 0; b < n; b++) eh[b] = ed[b] = SM_UNSET;
+    eh[0] = ed[0] = 0;
+    int nw = 0; work[nw++] = 0;
+    long long K = SM_UNSET, hfp = SM_UNSET, rbp_acc = 0;
+    while (nw && ok) {
+        int bi = work[--nw];
+        const IrBlock *b = &f->blocks[bi];
+        long long h = eh[bi], dd = ed[bi];
+        int vstk = 0;                              /* pushes of this block still on the value stack */
+        for (int k = 0; k < b->ninsns && ok; k++) {
+            const IrInsn *in = &b->insns[k];
+            int pro = is_prolog(in), epi = is_epilog(in);
+            /* frame accesses through rsp or rbp, and rsp read as a value */
+            const IrOperand *ops[3] = { &in->dst, &in->a, &in->b };
+            for (int j = 0; j < 3 && ok; j++) {
+                const IrOperand *o = ops[j];
+                if (o->kind == IR_O_MEM && o->base == 4) {
+                    long long kk = d->frame ? h - dd : h;
+                    if (K == SM_UNSET) K = kk; else if (K != kk) ok = 0;
+                    if (o->index == IR_NOREG && in->op != IR_ADDR && nacc < 256) {
+                        acc_lo[nacc] = h + o->disp; acc_hi[nacc++] = h + o->disp + (o->width ? o->width : 8);
+                    }
+                } else if (o->kind == IR_O_MEM && o->base == 5 && d->fp) {
+                    rbp_acc = 1;
+                    if (o->index == IR_NOREG && in->op != IR_ADDR && hfp != SM_UNSET && nacc < 256) {
+                        acc_lo[nacc] = hfp + o->disp; acc_hi[nacc++] = hfp + o->disp + (o->width ? o->width : 8);
+                    }
+                } else if (j > 0 && o->kind == IR_O_REG && o->reg == 4 && !pro && in->op != IR_PUSH && in->op != IR_POP &&
+                           !(in->dst.kind == IR_O_REG && in->dst.reg == 4)) {   /* rsp arithmetic: below */
+                    if (!d->frame) ok = 0;
+                    else if (K == SM_UNSET) K = h - dd; else if (K != h - dd) ok = 0;
+                }
+            }
+            if (!ok) break;
+            if (in->op == IR_PUSH) {
+                if (nsl < 64) slots[nsl++] = h - 8; else ok = 0;
+                h -= 8;
+                if (!pro) vstk++;
+            } else if (in->op == IR_POP) {
+                if (!epi) {
+                    if (vstk > 0) vstk--;
+                    else {
+                        /* restores a value pushed in another block: only an epilogue may */
+                        if (in->dst.kind != IR_O_REG || in->dst.reg == 0) ok = 0;
+                        for (int q = k + 1; q < b->ninsns && ok; q++) {
+                            const IrInsn *x = &b->insns[q];
+                            if (x->op == IR_POP || x->op == IR_NOP || x->op == IR_RET || is_epilog(x)) continue;
+                            if (x->op == IR_ADD && x->dst.kind == IR_O_REG && x->dst.reg == 4 && x->b.kind == IR_O_IMM) continue;
+                            ok = 0;
+                        }
+                        const IrInsn *t = &b->insns[b->ninsns - 1];
+                        if (t->op != IR_RET) ok = 0;
+                    }
+                }
+                h += 8;
+            } else if (pro && in->op == IR_MOV) {          /* mov rbp, rsp */
+                if (hfp != SM_UNSET && hfp != h) ok = 0;
+                hfp = h;
+            } else if (pro && in->op == IR_SUB) {          /* sub rsp, imm: the printer skips it */
+                h -= in->b.imm;
+            } else if (epi && in->op == IR_MOV) {          /* mov rsp, rbp */
+                if (hfp == SM_UNSET) ok = 0; else h = hfp;
+            } else if (in->dst.kind == IR_O_REG && in->dst.reg == 4) {
+                if (in->op == IR_ADD && in->a.kind == IR_O_REG && in->a.reg == 4 && in->b.kind == IR_O_IMM) {
+                    h += in->b.imm; dd += in->b.imm;
+                } else ok = 0;
+            } else if (d->fp && in->dst.kind == IR_O_REG && in->dst.reg == 5) {
+                ok = 0;                                     /* rbp addresses the frame; it must not move */
+            } else if (in->op == IR_RET) {
+                if (h != 0) ok = 0;
+            }
+        }
+        if (!ok) break;
+        for (int s = 0; s < b->nsucc; s++) {
+            int t = b->succ[s];
+            if (t < 0 || t >= n) continue;
+            if (eh[t] == SM_UNSET) { eh[t] = h; ed[t] = dd; work[nw++] = t; }
+            else if (eh[t] != h || ed[t] != dd) ok = 0;
+        }
+    }
+    if (ok && rbp_acc && K != SM_UNSET && d->frame && hfp != K) ok = 0;   /* rsp and rbp views must agree */
+    if (ok && rbp_acc && K != SM_UNSET && !d->frame) ok = 0;              /* separate slot namespaces */
+    for (int a = 0; a < nacc && ok; a++)
+        for (int p = 0; p < nsl; p++)
+            if (acc_lo[a] < slots[p] + 8 && slots[p] < acc_hi[a]) { ok = 0; break; }
+    if (ok && dent) for (int b = 0; b < n; b++) dent[b] = ed[b] == SM_UNSET ? 0 : ed[b];
+    free(eh); free(ed); free(work);
+    return ok;
+}
+
 /* Goto-free fallback for control flow the region structurer cannot nest (it
  * would recurse without end). Each block becomes one arm of a dispatch loop
  * keyed on a state variable st: the arm runs the block's statements, flushes its
  * register variables, then sets st to the next block. That simulates the CFG
  * exactly. It is used only where it is provably exact: every conditional branch
  * tests flags set in its own block, no SSE value is live across a block, and the
- * stack pointer never moves, so every block sees the same frame. Anything else
- * keeps the clean E402 refusal. */
-static int dispatch_safe(const IrFunc *f) {
+ * stack model above shows every block sees the frame where the machine has it.
+ * Anything else keeps the clean E402 refusal. */
+static int dispatch_safe(const D *d, const IrFunc *f) {
     for (int bi = 0; bi < f->nblocks; bi++) {
         const IrBlock *b = &f->blocks[bi];
         int nb = b->ninsns;
@@ -2634,8 +2747,6 @@ static int dispatch_safe(const IrFunc *f) {
         unsigned xw = 0;                              /* xmm pseudo-regs 16..47 written so far */
         for (int k = 0; k < nb; k++) {
             const IrInsn *in = &b->insns[k];
-            if (in->op == IR_PUSH || in->op == IR_POP) return 0;          /* stack pointer moves */
-            if (in->dst.kind == IR_O_REG && in->dst.reg == 4) return 0;
             const IrOperand *rd[2] = { &in->a, &in->b };
             for (int o = 0; o < 2; o++)
                 if (rd[o]->kind == IR_O_REG && rd[o]->reg >= 16 && rd[o]->reg < 48 &&
@@ -2644,21 +2755,29 @@ static int dispatch_safe(const IrFunc *f) {
                 xw |= 1u << (in->dst.reg - 16);
         }
     }
-    return 1;
+    return stack_model(d, f, NULL);
 }
 
 static void emit_dispatch(D *d, const IrFunc *f, int depth) {
     flush_decls(d);
     materialize(d, depth);                            /* parameters become register variables */
+    long long *dent = calloc((size_t)(f->nblocks > 0 ? f->nblocks : 1), sizeof *dent);
+    if (dent) stack_model(d, f, dent);
     emit(d, depth, "let st = 0;");
     emit(d, depth, "while (1) {");
     for (int bi = 0; bi < f->nblocks; bi++) {
         const IrBlock *b = &f->blocks[bi];
-        /* At block entry every register holds its variable; the frame pointer keeps its value. */
+        /* At block entry every register holds its variable; the frame pointer keeps
+         * its value; rsp is where the stack model puts it; the value stack is empty. */
         for (int r = 0; r < 16; r++) {
             if (r == 4 || (r == 5 && d->frame && d->fp)) continue;
             if (d->has[r]) ex_free(d->reg[r]);
             d->has[r] = 0;
+        }
+        while (d->nstk) ex_free(d->stk[--d->nstk]);
+        if (d->frame) {
+            long long e = dent ? dent[bi] : 0;
+            setr(d, 4, e ? exf("(fr + %lld)", d->frame + e) : exf("(fr + %d)", d->frame));
         }
         for (int r = 0; r < 32; r++) { if (d->xhas[r]) ex_free(d->xreg[r]); d->xhas[r] = 0; }
         d->cmp = NULL;
@@ -2693,6 +2812,7 @@ static void emit_dispatch(D *d, const IrFunc *f, int depth) {
     }
     emit(d, depth + 1, "}");
     emit(d, depth, "}");
+    free(dent);
 }
 
 static void decompile_fun(D *d, Fun *fi) {
@@ -2742,7 +2862,7 @@ static void decompile_fun(D *d, Fun *fi) {
             FILE *sv = d->out, *tm = open_memstream(&tb, &tn);
             if (tm) { d->out = tm; structure(d, f, &g, 0, -1, NULL, 1, 0); fclose(tm); d->out = sv; }
             free(tb);
-            if (g_struct_fail && dispatch_safe(f)) dispatch = 1;
+            if (g_struct_fail && dispatch_safe(d, f)) dispatch = 1;
             g_struct_fail = sv_fail; g_struct_fail_fn = sv_fn;
             d->vused = 0;
             if (d->cmp_snap) { ex_free(d->cmpa); ex_free(d->cmpb); }

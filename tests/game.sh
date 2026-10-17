@@ -138,14 +138,13 @@ gcc -O0 $G -o "$T/ssecheck" tests/ssecheck.c
 build gcc O2 statemachine
 ./rex match "$T/statemachine_gcc_O2" -o "$T/sm2.rex" >/dev/null
 grep -q "let st = 0;" "$T/sm2.rex"
-# recursive fib at gcc -O2 is still too tangled, and its stack pointer moves
-# (prologue push/pop), so the dispatch loop is not exact there either. The whole
-# decompile must refuse cleanly with a plain line and E402 and write no file.
+# recursive fib at gcc -O2 is too tangled for the structurer and its stack
+# pointer moves (prologue push/pop): the dispatch loop takes it once the stack
+# model shows every block sees the frame where the machine has it.
 printf '%s\n' '#include "rt.h"' 'int fib(int n){if(n<2)return n;return fib(n-1)+fib(n-2);}' \
     'int main(void){return fib(10);}' > "$T/recur.c"
 gcc -O2 $G -o "$T/recur_gcc_O2" "$T/recur.c"
-! ./rex tosource "$T/recur_gcc_O2" -o "$T/rc2.rex" 2> "$T/rc2.err"
-grep -q "too tangled" "$T/rc2.err" && grep -q "E402" "$T/rc2.err"
-test ! -f "$T/rc2.rex"
+./rex match "$T/recur_gcc_O2" -o "$T/rc2.rex" >/dev/null
+grep -q "let st = 0;" "$T/rc2.rex"
 rm -rf "$T"
 echo "game: ok"
