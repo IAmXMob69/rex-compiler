@@ -97,7 +97,7 @@ static inline int rex_errf(char *err, size_t errlen, int code, const char *fmt, 
 static inline int rex_err_explain(int code, char *out, size_t outn) {
     if (!out || !outn) return 1;
     const char *plain = rex_err_plain(code);
-    if (!strcmp(plain, "Something went wrong.") && (code < 100 || code > 601)) {
+    if (!strcmp(plain, "Something went wrong.")) {
         snprintf(out, outn, "I do not have a note for code %d. Try rex help.", code);
         return 1;
     }

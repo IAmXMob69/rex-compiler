@@ -36,15 +36,15 @@ static int run_capture(const char *bin, char *out, size_t outn, int *status) {
     return 0;
 }
 
-int rex_verify_bins(const char *a, const char *b, char *err, size_t errlen) {
+int rex_verify_bins(const char *a, const char *b, char *err, size_t errlen, int code) {
     char oa[1 << 16], ob[1 << 16];
     int sa, sb;
     if (run_capture(a, oa, sizeof(oa), &sa) || run_capture(b, ob, sizeof(ob), &sb))
-        return rex_errf(err, errlen, REX_E501_VERIFY, "could not run binaries");
+        return rex_errf(err, errlen, code, "could not run binaries");
     if (sa != sb)
-        return rex_errf(err, errlen, REX_E501_VERIFY, "exit %d vs %d", sa, sb);
+        return rex_errf(err, errlen, code, "exit %d vs %d", sa, sb);
     if (strcmp(oa, ob))
-        return rex_errf(err, errlen, REX_E501_VERIFY, "stdout/stderr differ");
+        return rex_errf(err, errlen, code, "stdout/stderr differ");
     return 0;
 }
 

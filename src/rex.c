@@ -2344,6 +2344,78 @@ void rex_refuse(const char *msg) {
     fputc('\n', stderr);
 }
 
+static const char *alias_cmd(const char *c);
+static int print_command_help(const char *cmd) {
+    const char *c = alias_cmd(cmd);
+    const char *text = NULL;
+    if (!strcmp(c, "run"))
+        text = "rex run <file.rex>\n"
+               "Build the file and run it right away. Nothing is kept.\n"
+               "The exit code is the program's exit code.\n";
+    else if (!strcmp(c, "build"))
+        text = "rex build <file.rex> [-o out]\n"
+               "Build the file into a Linux program. Default name: a.out.\n";
+    else if (!strcmp(c, "check"))
+        text = "rex check <file.rex>\n"
+               "Read the file and find mistakes. Builds nothing.\n"
+               "Mistakes show the line, the column and a ^ under the spot.\n";
+    else if (!strcmp(c, "inspect"))
+        text = "rex look <prog>   (also: inspect)\n"
+               "Show the headers: file type, entry point, sections, imports, exports.\n"
+               "Works on Linux ELF and Windows .exe/.dll.\n";
+    else if (!strcmp(c, "disasm"))
+        text = "rex show <prog>   (also: disasm)\n"
+               "rex show --cfg <prog>          split into functions and blocks\n"
+               "rex show --function <F> <prog> just one function (a name or a hex address)\n"
+               "Show the machine instructions. The flag must come right after \"show\".\n";
+    else if (!strcmp(c, "ir"))
+        text = "rex ir [--function <F>] <prog>\n"
+               "Print the machine IR, for the whole program or one function.\n";
+    else if (!strcmp(c, "decompile"))
+        text = "rex tosource <prog> [-o out.rex] [--verify] [--verbose]   (also: undo, decompile)\n"
+               "Turn a program back into source. A REX program comes back as .rex.\n"
+               "--verify   also build the .rex and check it acts the same (same as match)\n"
+               "--verbose  list what was found\n";
+    else if (!strcmp(c, "recompile"))
+        text = "rex rebuild <prog> [-o out] [--poison] [--debug] [--verify] [--ir]   (also: recompile)\n"
+               "Write new code for a Linux program. Default name: a.out.\n"
+               "--poison   fill the old code with int3, so only the new code can run\n"
+               "--debug    print where each function moved\n"
+               "--verify   run both and check they match (same as compare)\n"
+               "--ir       with --verify, also check the machine IR matches\n";
+    else if (!strcmp(c, "compare"))
+        text = "rex compare <prog> [-o out] [--ir] [--poison] [--debug]\n"
+               "Rebuild the program, run both, and check they act the same.\n"
+               "--ir   also check the machine IR matches\n";
+    else if (!strcmp(c, "match"))
+        text = "rex match <prog> [-o out.rex] [--ir] [--verbose]\n"
+               "Turn it into .rex, build that, run both, and check they act the same.\n"
+               "--ir   also check the machine IR matches\n";
+    else if (!strcmp(c, "asm"))
+        text = "rex asm <file.rex>\n"
+               "Build the file and print the generated assembly to stdout.\n";
+    else if (!strcmp(c, "elf"))
+        text = "rex elf <file.s> [-o out]\n"
+               "Assemble REX assembly text straight into an ELF. Default name: a.out.\n";
+    else if (!strcmp(c, "explain"))
+        text = "rex explain <code>\n"
+               "Say what an error code means. Example: rex explain E103\n";
+    else if (!strcmp(c, "version"))
+        text = "rex version   (also: --version)\n"
+               "Print the version.\n";
+    else if (!strcmp(c, "help"))
+        text = "rex help [command]\n"
+               "With no command, print the command list. With one, print more about it.\n";
+    if (!text) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "I have no help for \"%s\". Try rex help for the list.", cmd);
+        rex_refuse(msg);
+        return 2;
+    }
+    fputs(text, stdout);
+    return 0;
+}
+
 static void print_help(void) {
     fprintf(stderr,
         "REX %s — compile, look inside, and rebuild programs\n"
@@ -2362,6 +2434,7 @@ static void print_help(void) {
         "  rex match --ir <file>             same, but also compare the machine IR\n"
         "  rex explain E101                   plain English for an error code\n"
         "  rex help                           this help\n"
+        "  rex help <command>                 more about one command\n"
         "\n"
         "Also still work (same tools, longer names):\n"
         "  rex check / asm / elf / inspect / disasm / ir / recompile / decompile / version\n"
@@ -2466,14 +2539,17 @@ int main(int argc, char **argv) {
     rex_color_init(cmode);
     if (argc < 2) usage();
     argv[1] = (char *)alias_cmd(argv[1]);
-    if (!strcmp(argv[1], "help")) { print_help(); return 0; }
+    if (!strcmp(argv[1], "help")) {
+        if (argc >= 3) return print_command_help(argv[2]);
+        print_help(); return 0;
+    }
     if (!strcmp(argv[1], "explain")) {
         if (argc < 3) { fprintf(stderr, "rex: explain needs a code like E101\n"); return 2; }
         const char *s = argv[2];
         if (s[0] == 'E' || s[0] == 'e') s++;
         int code = atoi(s);
         char buf[256];
-        if (rex_err_explain(code, buf, sizeof(buf))) { fprintf(stderr, "rex: %s\n", buf); return 2; }
+        if (rex_err_explain(code, buf, sizeof(buf))) { rex_refuse(buf); return 2; }
         printf("%s\n", buf);
         return 0;
     }
@@ -2491,7 +2567,7 @@ int main(int argc, char **argv) {
         int rc = rex_recompile(in, out, debug);
         if (rc) return rc;
         char err[256];
-        rc = rex_verify_bins(in, out, err, sizeof(err));
+        rc = rex_verify_bins(in, out, err, sizeof(err), REX_E501_VERIFY);
         if (rc) { rex_refuse(err); return rc; }
         if (want_ir) {
             rc = rex_verify_ir(in, out, err, sizeof(err));
@@ -2518,7 +2594,7 @@ int main(int argc, char **argv) {
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
         if (compile_to(out, tmp)) { unlink(tmp); return 1; }
         char err[256];
-        rc = rex_verify_bins(in, tmp, err, sizeof(err));
+        rc = rex_verify_bins(in, tmp, err, sizeof(err), REX_E601_VERIFY);
         if (rc) { unlink(tmp); rex_refuse(err); return rc; }
         if (want_ir) {
             rc = rex_verify_ir(in, tmp, err, sizeof(err));
@@ -2557,7 +2633,7 @@ int main(int argc, char **argv) {
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
         if (compile_to(out, tmp)) { unlink(tmp); return 1; }
         char err[256];
-        rc = rex_verify_bins(in, tmp, err, sizeof(err));
+        rc = rex_verify_bins(in, tmp, err, sizeof(err), REX_E601_VERIFY);
         unlink(tmp);
         if (rc) { rex_refuse(err); return rc; }
         fprintf(stderr, "rex: match: ok — the recovered source matches\n");
@@ -2578,7 +2654,7 @@ int main(int argc, char **argv) {
         int rc = rex_recompile(in, out, debug);
         if (rc || !verify) return rc;
         char err[256];
-        rc = rex_verify_bins(in, out, err, sizeof(err));
+        rc = rex_verify_bins(in, out, err, sizeof(err), REX_E501_VERIFY);
         if (rc) { rex_refuse(err); return rc; }
         if (want_ir) {
             rc = rex_verify_ir(in, out, err, sizeof(err));
@@ -2613,9 +2689,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "check") == 0) {
         if (argc < 3) usage();
-        compile_to(argv[2], "/tmp/rexcheck.bin");
+        int rc = compile_to(argv[2], "/tmp/rexcheck.bin");
         unlink("/tmp/rexcheck.bin");
-        return 0;
+        return rc;
     }
     if (strcmp(argv[1], "build") == 0) {
         const char *in = NULL, *out = "a.out";
@@ -2624,8 +2700,7 @@ int main(int argc, char **argv) {
             else in = argv[i];
         }
         if (!in) { fprintf(stderr, "rex: build needs a .rex file\n"); return 2; }
-        compile_to(in, out);
-        return 0;
+        return compile_to(in, out);
     }
     if (strcmp(argv[1], "run") == 0) {
         if (argc < 3) usage();
