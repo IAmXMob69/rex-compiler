@@ -127,5 +127,12 @@ build gcc O2 entities
 # this match stays green only if the recovered lanes equal the real CPU.
 gcc -O0 $G -o "$T/ssecheck" tests/ssecheck.c
 ./rex match "$T/ssecheck" -o "$T/ssecheck.rex" >/dev/null
+# statemachine gcc -O2: gcc's dispatch overruns the structurer budget. The
+# whole decompile must refuse cleanly with a plain line and E402 and write no
+# file, instead of emitting a half-structured body full of broken stubs.
+build gcc O2 statemachine
+! ./rex tosource "$T/statemachine_gcc_O2" -o "$T/sm2.rex" 2> "$T/sm2.err"
+grep -q "too tangled" "$T/sm2.err" && grep -q "E402" "$T/sm2.err"
+test ! -f "$T/sm2.rex"
 rm -rf "$T"
 echo "game: ok"

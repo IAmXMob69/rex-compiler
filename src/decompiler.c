@@ -1573,6 +1573,11 @@ static void emit_ret(D *d, int depth) {
 }
 
 static int g_budget;
+/* Set when a function overruns the structurer budget or nesting depth; the
+ * whole decompile then refuses with E402 rather than emitting a
+ * half-structured function body full of broken stubs. */
+static int g_struct_fail;
+static const char *g_struct_fail_fn;
 
 /* Foreign code: registers live across blocks become variables vN. At each
  * block end, pending register expressions are assigned (in two phases when
@@ -1986,7 +1991,8 @@ static void merge_chain(D *d, const IrFunc *f, G *g, const LCtx *lc, int stop, E
 
 static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx *lc, int depth, int enter) {
     if (depth > 48 || g_budget <= 0) {
-        emit(d, depth, "// E402: control flow too tangled to structure here (block %d)", bi);
+        g_struct_fail = 1;
+        g_struct_fail_fn = f->name;
         g_budget = 0;
         return;
     }
@@ -2511,8 +2517,26 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     blob_scan(&d);
 
 
+    g_struct_fail = 0; g_struct_fail_fn = NULL;
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 0) decompile_fun(&d, &d.fun[i]);
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 2) decompile_fun(&d, &d.fun[i]);
+    if (g_struct_fail) {
+        /* A function could not be structured within the budget. Refuse the
+         * whole decompile with a clean E402 instead of writing broken stubs. */
+        if (d.out != out) fclose(d.out);
+        free(body);
+        for (int i = 0; i < 16; i++) if (d.has[i]) ex_free(d.reg[i]);
+        while (d.nstk) ex_free(d.stk[--d.nstk]);
+        free(d.stk);
+        free(d.fun);
+        fclose(out);
+        remove(outpath);
+        int _e = rex_errf(err, sizeof(err), REX_E402_IRREDUCIBLE, "%s",
+                          g_struct_fail_fn ? g_struct_fail_fn : "a function");
+        rex_refuse(err);
+        ir_module_free(m); cfg_free(&p); rex_elf_free(&e);
+        return _e;
+    }
     if (d.out != out) fclose(d.out);
     fprintf(out, "// recovered by rex decompile\n");
     if (d.foreign)
