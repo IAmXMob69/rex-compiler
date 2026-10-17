@@ -2509,6 +2509,18 @@ int rex_cmd_disasm_func(const char *path, const char *fname);
 int rex_cmd_ir(const char *path, const char *fname);
 int rex_recompile(const char *in, const char *out, int debug);
 int rex_decompile(const char *in, const char *out, int verbose);
+int rex_decompile_libcalls(char *name, size_t n);
+
+/* The recovered source calls libc, which a rebuilt program cannot reach:
+ * refuse the run with E602 instead of a confusing build error or mismatch. */
+static int refuse_libcalls(const char *out) {
+    char lib[48];
+    if (!rex_decompile_libcalls(lib, sizeof lib)) return 0;
+    char err[512];
+    rex_errf(err, sizeof err, REX_E602_LIBCALL, "%s() comes from a shared library; the source is in %s", lib, out);
+    rex_refuse(err);
+    return REX_E602_LIBCALL;
+}
 
 static const char *alias_cmd(const char *c) {
     if (!strcmp(c, "look")) return "inspect";
@@ -2590,6 +2602,7 @@ int main(int argc, char **argv) {
         if (!in) { fprintf(stderr, "rex: match needs a program file\n"); return 2; }
         int rc = rex_decompile(in, out, verbose);
         if (rc) return rc;
+        if ((rc = refuse_libcalls(out))) return rc;
         char tmp[] = "/tmp/rexverXXXXXX";
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);
         if (compile_to(out, tmp)) { unlink(tmp); return 1; }
@@ -2628,6 +2641,7 @@ int main(int argc, char **argv) {
         if (!in) usage();
         int rc = rex_decompile(in, out, verbose);
         if (rc || !verify) return rc;
+        if ((rc = refuse_libcalls(out))) return rc;
         /* Rebuild decompiled source and compare behavior to the original. */
         char tmp[] = "/tmp/rexverXXXXXX";
         int fd = mkstemp(tmp); if (fd < 0) die("mkstemp"); close(fd);

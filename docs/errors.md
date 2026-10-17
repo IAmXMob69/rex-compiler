@@ -13,7 +13,8 @@ Each entry below is the plain sentence REX prints, then a one-line fix.
 - **E101** — This Windows program needs a feature I do not support yet.
   Fix: run `rex look <prog>` to see which part.
 - **E102** — This Linux-style program file is a kind I can't open.
-  Fix: use a 64-bit x86-64 ELF that is not PIE.
+  Fix: use a 64-bit x86-64 ELF program. PIE and dynamically linked programs
+  open; a shared library has no entry point, so it is not a program.
 - **E103** — I could not read that file.
   Fix: check the path and that you can read it.
 - **E104** — This Windows program is built for a different processor than x86-64.
@@ -64,6 +65,9 @@ Each entry below is the plain sentence REX prints, then a one-line fix.
   Fix: try `rex tosource --c`.
 - **E601** — The code I got back acted differently from the original when I ran both.
   Fix: this is a decompile gap; try `rex tosource --c` to read it instead.
+- **E602** — This program calls code from a shared library (like printf), and I can't rebuild those calls yet.
+  Fix: read it with `rex tosource`; library calls show by name. `match` and
+  `decompile --verify` refuse because the rebuilt program has no library to call.
 
 ## Not yet in the code
 
