@@ -73,7 +73,8 @@ static void zext32(L *l, IrOperand d) {
     }
 }
 
-/* One-operand mul/imul: rdx:rax = rax * src, at 32 or 64 bits. Lifted as the
+/* One-operand mul/imul: rdx:rax = rax * src, at 16, 32 or 64 bits (8 bits:
+ * ax = al * src, below). Lifted as the
  * high half (IR_MULHU/IR_MULHS into rdx) then the low half (IR_MUL into rax),
  * both reading the original rax and src. A source the first write would
  * change (rdx, or memory addressed through rdx) is first copied to the stack
@@ -95,8 +96,17 @@ static void scratch_restore(L *l, int r) {
 static void lift_mul1(L *l, const X86Insn *in, IrOperand s, int sgn) {
     int w = s.width;
     (void)in;
-    if (w != 4 && w != 8) { lfail(l, w == 1 ? "8-bit one-operand mul is not supported" : "16-bit one-operand mul is not supported"); return; }
     IrInsn *i;
+    if (w == 1) {
+        /* ax = al * src: one full-product step (dst twice the width of a);
+         * the source is read before ax is written, so nothing is spilled */
+        wrote(l, ir_reg(0, 8));
+        i = emit(l, sgn ? IR_MULHS : IR_MULHU);
+        i->dst = ir_reg(0, 2); i->a = ir_reg(0, 1); i->b = s;
+        l->flags = FL_NONE;
+        return;
+    }
+    if (w != 2 && w != 4 && w != 8) { lfail(l, "one-operand mul of this width is not supported"); return; }
     if ((s.kind == IR_O_REG && s.reg == 2) || (s.kind == IR_O_MEM && (s.base == 2 || s.index == 2))) {
         if (s.kind == IR_O_MEM) { i = emit(l, IR_LOAD); i->dst = ir_reg(2, w); i->a = s; zext32(l, ir_reg(2, w)); }
         IrOperand sp = ir_mem(4, IR_NOREG, 1, MUL_SPILL, w);

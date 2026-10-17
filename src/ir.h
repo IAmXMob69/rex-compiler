@@ -54,6 +54,7 @@ typedef enum {
     IR_VEC,     /* packed SIMD lane op; vop selects it, dst.width = lane size */
     IR_MULHU,   /* dst = high half of a * b at dst.width, unsigned (x86 one-operand mul) */
     IR_MULHS,   /* the same, signed (one-operand imul) */
+                /* (dst.width == 2, a.width == 1: the whole product, ax = al * b) */
     IR_OP_COUNT
 } IrOp;
 

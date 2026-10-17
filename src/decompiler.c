@@ -1352,6 +1352,11 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             else if (d->foreign && in->op == IR_SHR && in->dst.width == 8 && in->b.kind == IR_O_IMM && (in->b.imm & 63)) {
                 int k = (int)(in->b.imm & 63);
                 setr(d, in->dst.reg, ex_bin("&", ex_bin(">>", op_ex(d, &in->a), exf("%d", k)), exf("%llu", (1ULL << (64 - k)) - 1)));
+            } else if (in->op == IR_MUL && in->dst.width == 2) {
+                /* 16-bit product: the bits above ax (or the register) are kept */
+                Ex p = ex_bin("*", op_ex(d, &in->a), op_ex(d, &in->b));
+                Ex old = getr(d, in->dst.reg);
+                setr(d, in->dst.reg, ex_bin("|", ex_bin("&", old, exf("-65536")), ex_mask(p, 2)));
             } else
                 setr(d, in->dst.reg, ex_bin(bop(in->op), op_ex(d, &in->a), op_ex(d, &in->b)));
         } else if (in->dst.kind == IR_O_MEM && d->foreign && in->op != IR_DIVU && in->op != IR_REMU) {
@@ -1365,7 +1370,15 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         /* high half of rax * b (lifted one-operand mul/imul); dst is a register */
         if (in->dst.kind == IR_O_REG) {
             Ex a = op_ex(d, &in->a), b = op_ex(d, &in->b);
-            if (in->dst.width == 8) {
+            if (in->dst.width < 4) {
+                /* 8-bit: ax = al * b; 16-bit: the high half into dx. The
+                 * register's bits above the 16 written are kept. */
+                int aw = in->a.width;
+                Ex p = in->op == IR_MULHU ? ex_bin("*", ex_mask(a, aw), ex_mask(b, aw)) : ex_bin("*", ex_sext(a, aw), ex_sext(b, aw));
+                if (aw == 2) p = ex_bin(">>", p, exf("16"));
+                Ex old = getr(d, in->dst.reg);
+                setr(d, in->dst.reg, ex_bin("|", ex_bin("&", old, exf("-65536")), ex_mask(p, 2)));
+            } else if (in->dst.width == 8) {
                 d->need_mulh = 1;
                 setr(d, in->dst.reg, exf("%s(%s, %s)", in->op == IR_MULHU ? "umulh" : "smulh", a.s, b.s));
                 ex_free(a); ex_free(b);

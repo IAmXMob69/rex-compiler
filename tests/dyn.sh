@@ -248,11 +248,11 @@ for to in 'lea\t1(%rdi), %ecx\n\tcmp\t$4, %ecx\n\tjbe\t.Lload' \
 done
 # a function main reaches is code that runs: one REX can't lift is an error,
 # never left out of the source (a non-PIE _start passes main in rdi)
-printf '%s\n' '__attribute__((noinline)) int mb(unsigned char a, unsigned char b){ unsigned short r; __asm__("mov %1, %%al; mulb %2; mov %%ax, %0" : "=r"(r) : "r"(a), "r"(b) : "ax", "cc"); return r; }' \
+printf '%s\n' '__attribute__((noinline)) int mb(unsigned char a, unsigned char b){ unsigned short r; __asm__("mov %%cl, %%al; mov %%dl, %%ah; add %%ah, %%al; movzbw %%al, %%ax" : "=a"(r) : "c"(a), "d"(b) : "cc"); return r; }' \
     'int main(void){ volatile int x = 13; return mb(x, 11) & 255; }' > "$T/drop.c"
 gcc -O2 -no-pie -fno-pic -o "$T/drop" "$T/drop.c"
 set +e; ./rex tosource "$T/drop" -o "$T/drop.rex" 2> "$T/drop.err"; rc=$?; set -e
-test $rc -ne 0 && grep -q "E300: mb at 0x[0-9a-f]*: 8-bit one-operand mul" "$T/drop.err"
+test $rc -ne 0 && grep -q "E300: mb at 0x[0-9a-f]*: ah/bh/ch/dh" "$T/drop.err"
 # 32/64-bit div and idiv rebuilt, every sign, r11 kept across a call
 # (tests/dec/divfs.c); the same through match (tests/dec/divr11.c)
 for cc in gcc clang; do for o in O0 O1 O2 O3; do
@@ -323,12 +323,18 @@ for cc in gcc clang; do
     $cc -O2 -static -nostdlib -fno-pic -fno-stack-protector -o "$T/mulfs" tests/dec/mulfs.c 2>/dev/null
     ./rex compare "$T/mulfs" -o "$T/mulfs.out" >/dev/null 2>&1
 done
-# 8-bit mul (ax = al * src) is refused at the lift, no file
-printf '%s\n' 'int main(int c, char **v){ unsigned char a = (unsigned char)(c + 200); unsigned short r;' \
+# 8/16-bit mul and imul (ax = al * src, dx:ax = ax * src), every source
+# form, the bits above the 16 written kept: rebuilt, and through match
+for cc in gcc clang; do for o in O0 O2 O3; do
+    $cc -$o -static -nostdlib -fno-pic -fno-stack-protector -o "$T/mul8fs" tests/dec/mul8fs.c
+    ./rex compare "$T/mul8fs" -o "$T/mul8fs.out" >/dev/null 2>&1
+    $cc -$o -DMAIN -no-pie -fno-pic -o "$T/mul8m" tests/dec/mul8fs.c
+    ./rex match "$T/mul8m" -o "$T/mul8m.rex" >/dev/null 2>&1
+done; done
+printf '%s\n' 'int main(void){ volatile int c = 1; unsigned char a = (unsigned char)(c + 200); unsigned short r;' \
     '  __asm__("movb %1, %%al; mulb %%al" : "=a"(r) : "r"(a)); return r & 255; }' > "$T/mb.c"
 gcc -O1 -no-pie -fno-pic -o "$T/mb" "$T/mb.c"
-set +e; ./rex tosource "$T/mb" -o "$T/mb.rex" 2> "$T/mb.err"; rc=$?; set -e
-test $rc -ne 0 && grep -q "8-bit one-operand mul" "$T/mb.err" && test ! -e "$T/mb.rex"
+./rex match "$T/mb" -o "$T/mb.rex" >/dev/null 2>&1
 # match runs both programs on several argv/stdin inputs and compares exit,
 # stdout and stderr byte for byte: a main that only differs when given
 # arguments (REX has no argv) is no longer a match

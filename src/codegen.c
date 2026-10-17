@@ -309,11 +309,21 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
             /* One-operand mul/imul as the lifter emits it: mulh rdx = rax, b then
              * mul rax = rax, b at the same width. One instruction serves both. */
             const IrOperand *b = &in->b;
+            int ext = in->op == IR_MULHU ? 4 : 5;
+            if (in->dst.kind == IR_O_REG && in->dst.reg == 0 && in->dst.width == 2 && in->a.kind == IR_O_REG &&
+                in->a.reg == 0 && in->a.width == 1 && b->width == 1 && (b->kind == IR_O_REG || b->kind == IR_O_MEM)) {
+                /* 8-bit form: ax = al * b, one mul/imul r/m8 */
+                if (b->kind == IR_O_REG) {
+                    if (byte_needs_rex(b->reg) && b->reg < 8) rex_force(g, 0, 0, 0, 0); else rex(g, 0, 0, 0, hi(b->reg));
+                    eb(g, 0xf6); modrm_rr(g, ext, b->reg);
+                } else { mem_rex(g, 1, 0, b, 0); eb(g, 0xf6); modrm_mem(g, ext, b); }
+                break;
+            }
             const IrInsn *nx = k + 1 < bl->ninsns ? &bl->insns[k + 1] : NULL;
             int w = in->dst.width;
             int okb = (b->kind == IR_O_REG && b->reg != 2) ||
                       (b->kind == IR_O_MEM && b->base != 2 && b->index != 2);
-            if (!okb || (w != 4 && w != 8) || b->width != w || in->dst.kind != IR_O_REG || in->dst.reg != 2 ||
+            if (!okb || (w != 2 && w != 4 && w != 8) || b->width != w || in->dst.kind != IR_O_REG || in->dst.reg != 2 ||
                 in->a.kind != IR_O_REG || in->a.reg != 0 || in->a.width != w || !nx || nx->op != IR_MUL ||
                 nx->dst.kind != IR_O_REG || nx->dst.reg != 0 || nx->dst.width != w ||
                 nx->a.kind != IR_O_REG || nx->a.reg != 0 || nx->b.kind != b->kind || nx->b.width != w ||
@@ -322,7 +332,7 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
                 cgfail(g, "high multiply without its low half (mulh rdx, rax then mul rax)");
                 break;
             }
-            int ext = in->op == IR_MULHU ? 4 : 5;
+            if (w == 2) eb(g, 0x66);
             if (b->kind == IR_O_REG) { rex(g, width_w(w), 0, 0, hi(b->reg)); eb(g, 0xf7); modrm_rr(g, ext, b->reg); }
             else { mem_rex(g, w, 0, b, 0); eb(g, 0xf7); modrm_mem(g, ext, b); }
             k++;                                    /* the low half is in rax already */

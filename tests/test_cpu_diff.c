@@ -388,7 +388,11 @@ int main(void) {
             {{0xf7,0xea}, 2, X86_IMUL, 1, 4, XO_REG, 2},         /* imul %edx */
             {{0x48,0xf7,0x22}, 3, X86_MUL, 1, 8, XO_MEM, -1},    /* mulq (%rdx) */
             {{0x49,0xf7,0xe0}, 3, X86_MUL, 1, 8, XO_REG, 8},     /* mul %r8 */
-            {{0xf6,0xe1}, 2, X86_MUL, 1, 1, XO_REG, 1},          /* mul %cl (decoded; the lift refuses) */
+            {{0xf6,0xe1}, 2, X86_MUL, 1, 1, XO_REG, 1},          /* mul %cl */
+            {{0xf6,0xe9}, 2, X86_IMUL, 1, 1, XO_REG, 1},         /* imul %cl */
+            {{0x40,0xf6,0xe6}, 3, X86_MUL, 1, 1, XO_REG, 6},     /* mul %sil */
+            {{0x66,0xf7,0xe1}, 3, X86_MUL, 1, 2, XO_REG, 1},     /* mul %cx */
+            {{0x66,0xf7,0xea}, 3, X86_IMUL, 1, 2, XO_REG, 2},    /* imul %dx */
         };
         for (size_t i = 0; i < sizeof dc / sizeof dc[0]; i++) {
             X86Insn mi;
@@ -432,6 +436,33 @@ int main(void) {
                       ruh != hu || rsh != hs || ruh4 != hu4 || rsh4 != hs4;
             g_cases++;
             if (bad) { if (g_fail < 20) printf("FAIL mul a=%#" PRIx64 " b=%#" PRIx64 "\n", a, b); g_fail++; } else g_ok++;
+        }
+    }
+    {
+        /* 8/16-bit one-operand mul/imul: the host against the decompiler's
+         * expressions (rax = (rax & -65536) | (p & 65535), p the product of
+         * the masked or sign-extended halves; 16 bits: dx gets p >> 16) */
+        uint64_t rng = 0x8b16cafeULL;
+        for (int t = 0; t < 4000; t++) {
+            uint64_t a = xr(&rng), d0 = xr(&rng), b = xr(&rng);
+            if (t & 1) a |= 0x8080;
+            if (t & 2) b |= 0x8080;
+            uint64_t ub = a, sb = a, uwa = a, uwd = d0, swa = a, swd = d0;
+            __asm__ volatile("mulb %b1" : "+a"(ub) : "c"(b) : "cc");
+            __asm__ volatile("imulb %b1" : "+a"(sb) : "c"(b) : "cc");
+            __asm__ volatile("mulw %w2" : "+a"(uwa), "+d"(uwd) : "c"(b) : "cc");
+            __asm__ volatile("imulw %w2" : "+a"(swa), "+d"(swd) : "c"(b) : "cc");
+            int64_t A = (int64_t)a, B = (int64_t)b, D = (int64_t)d0;
+            int64_t pu8 = (A & 255) * (B & 255), ps8 = ((A & 255) << 56 >> 56) * ((B & 255) << 56 >> 56);
+            int64_t pu16 = (A & 65535) * (B & 65535), ps16 = ((A & 65535) << 48 >> 48) * ((B & 65535) << 48 >> 48);
+            uint64_t eub = (uint64_t)((A & -65536) | (pu8 & 65535)), esb = (uint64_t)((A & -65536) | (ps8 & 65535));
+            uint64_t euwa = (uint64_t)((A & -65536) | (pu16 & 65535)), euwd = (uint64_t)((D & -65536) | ((pu16 >> 16) & 65535));
+            uint64_t eswa = (uint64_t)((A & -65536) | (ps16 & 65535)), eswd = (uint64_t)((D & -65536) | ((ps16 >> 16) & 65535));
+            g_cases++;
+            if (ub != eub || sb != esb || uwa != euwa || uwd != euwd || swa != eswa || swd != eswd) {
+                if (g_fail < 20) printf("FAIL mul8/16 a=%#" PRIx64 " b=%#" PRIx64 "\n", a, b);
+                g_fail++;
+            } else g_ok++;
         }
     }
     printf("cpu diff: %d ok, %d fail, %d cases\n", g_ok, g_fail, g_cases);
