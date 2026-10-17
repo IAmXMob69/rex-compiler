@@ -2362,7 +2362,7 @@ static int print_command_help(const char *cmd) {
                "Mistakes show the line, the column and a ^ under the spot.\n";
     else if (!strcmp(c, "inspect"))
         text = "rex look <prog>   (also: inspect)\n"
-               "Show the headers: file type, entry point, sections, imports, exports.\n"
+               "Show the headers: file type, entry point, size, segments and sections.\n"
                "Works on Linux ELF and Windows .exe/.dll.\n";
     else if (!strcmp(c, "disasm"))
         text = "rex show <prog>   (also: disasm)\n"

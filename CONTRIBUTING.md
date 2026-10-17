@@ -34,9 +34,10 @@ failing test pass.
 - Match the existing C style (C11, 4-space indent, short static helpers).
 - 0 compiler warnings with the Makefile flags. All tests green.
 - New refusals: a plain-English sentence first, then an E-code. Add the code
-  to `src/rex_err.h` and to the error table in `docs/compiler.md`.
-- New command: give it an everyday alias and add it to the simple CLI table,
-  which stays first in the README.
+  to `src/rex_err.h` and to `docs/errors.md`, with a fix you have run.
+- New command: give it an everyday alias. The everyday commands stay first in
+  the README and in `rex help`.
+- No tables in docs or help text, and no comparisons with other tools.
 - Don't change the REX compile path (`src/rex.c`, `src/elf.c`, `src/codegen.c`)
   without tests that cover the change.
 - State limits as they are. If something is measured, give the number.

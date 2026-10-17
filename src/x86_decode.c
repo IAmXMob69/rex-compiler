@@ -92,10 +92,14 @@ static X86Operand xmm_op(int reg, int size) {
     return o;
 }
 
-/* SSE move / xor-self-zero subset. b2 is the byte after 0F. o66/f3 are the
- * mandatory prefixes. Returns 1 handled, 0 not an SSE opcode we model, -1 bad.
- * Packed arithmetic (paddd, pshufd, punpck, pcmp, ...) is intentionally not
- * decoded and stays an unsupported-instruction refusal. */
+/* SSE subset. b2 is the byte after 0F. o66/f3 are the mandatory prefixes.
+ * Returns 1 handled, 0 not an SSE opcode we model, -1 bad.
+ * Moves: movaps/movups/movdqa/movdqu (load, store, reg-reg), movd/movq to and
+ * from a GPR, movq low-8 load and store, xorps/pxor self-zero.
+ * Packed integer math, register sources only: paddd, psubd, pand, por, pxor,
+ * pcmpeq/pcmpgt b/w/d, punpckl/punpckh bw/wd/dq/qdq, pshufd imm, psrlq/psllq imm.
+ * A memory source for those (paddd m128, ...) returns -1, and anything else
+ * (pmuludq, paddq, psrld, ...) returns 0: both are E200 in the CFG. */
 static int decode_sse(Rd *r, Ctx *c, X86Insn *out, unsigned b2, int o66, int f3) {
     X86Operand e, xr;
     int w8 = c->w ? 8 : 4;

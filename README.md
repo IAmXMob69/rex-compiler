@@ -97,7 +97,7 @@ That prints 42.
 
 ## Errors
 
-Every refusal prints one plain sentence, then a code and the detail, for example `E503: prog is dynamically linked; ...`. The exit status is the code number when it fits in an exit status, and a bad command line exits with 2. `rex explain <code>` repeats the sentence. The full list with fixes is in [docs/errors.md](docs/errors.md).
+Every refusal prints one plain sentence, then a code and the detail, for example `E503: prog is dynamically linked; ...`. Read the code from that line: E1xx codes are also the exit status, other refusals exit nonzero, and a bad command line exits with 2. `rex explain <code>` repeats the sentence. The full list with fixes is in [docs/errors.md](docs/errors.md).
 
 - E1xx: opening the file (format, PE features)
 - E2xx: decoding instructions
