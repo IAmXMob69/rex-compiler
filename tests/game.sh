@@ -45,6 +45,8 @@ for o in O0 O1; do
     ./rex match "$T/statemachine_gcc_$o" -o "$T/s.rex" >/dev/null
 done
 grep -q 'let fr = gfr;' "$T/s.rex"
+# frame block is handed back on return
+grep -q 'free(fr);' "$T/s.rex"
 # unsigned div/mod: rebuild and recovered source behave the same
 for o in O0 O1; do
     "gcc" "-$o" $G -o "$T/udiv_$o" tests/udiv.c

@@ -232,7 +232,7 @@ Lexer and parser state is local. The rest of `src/rex.c` is file-scope: `g_out`,
 
 ## Known issues
 
-- Decompiled gcc/clang functions with a frame block (`fr`) allocate on every call and never free; deep recursion can run out of memory.
+- Decompiled gcc/clang functions with a frame block (`fr`) allocate on every call and free it at each return; mutual recursion through an unrecovered path could still leak.
 - gcc IPA register allocation (a callee known not to clobber a caller-saved register) is not modeled; such callers may not round-trip.
 - Nodes store a line, not a column. The caret uses a token column only when the caller passes one (`col_of`).
 - Self-host is not done. `examples/rexcomp.rex` reaches a fixed point for its own subset only. It is not a self-host of `src/rex.c`.

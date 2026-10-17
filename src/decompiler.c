@@ -1419,6 +1419,21 @@ static int block_emits(const IrBlock *b) {
 static void emit_ret(D *d, int depth) {
     if (d->cur->kind != 2 || d->foreign) {
         char bb[1024];
+        /* A frame function owns a heap block (fr); hand it back before leaving.
+         * Stash the return value first so it never names freed memory. */
+        if (d->foreign && d->frame) {
+            if (d->has[0]) {
+                int k = d->nx++;
+                emit(d, depth, "x%d = %s;", k, bare(d->reg[0].s, bb, sizeof bb));
+                emit(d, depth, "free(fr);");
+                emit(d, depth, "return x%d;", k);
+            } else {
+                d->vused |= 1u;
+                emit(d, depth, "free(fr);");
+                emit(d, depth, "return v0;");
+            }
+            return;
+        }
         if (d->has[0]) emit(d, depth, "return %s;", bare(d->reg[0].s, bb, sizeof bb));
         else if (d->foreign) { d->vused |= 1u; emit(d, depth, "return v0;"); }
         else emit(d, depth, "return 0;");
@@ -2155,7 +2170,7 @@ static void decompile_fun(D *d, Fun *fi) {
                 fprintf(d->out, "fn %s(", fi->name);
                 for (int a = 0; a < fi->nargs; a++) fprintf(d->out, "%s%c", a ? ", " : "", 'a' + a);
                 fprintf(d->out, ") {\n");
-                if (d->frame) { d->need_gfr = 1; fprintf(d->out, "    gfr = alloc(%d);\n    let fr = gfr; // stack frame (arrays / addresses), rsp = fr + %d\n", 2 * d->frame, d->frame); }
+                if (d->frame) { d->need_gfr = 1; fprintf(d->out, "    gfr = alloc(%d);\n    let fr = gfr; // stack frame (arrays / addresses), rsp = fr + %d; freed at each return\n", 2 * d->frame, d->frame); }
                 for (int r = 0; r < 16; r++) if (d->vused & (1u << r)) fprintf(d->out, "    let v%d = 0;\n", r);
                 for (int r = 0; r < 16; r++) if (d->vused & (1u << (16 + r))) fprintf(d->out, "    let w%d = 0;\n", r);
                 for (int k = 0; k < d->nx; k++) fprintf(d->out, "    let x%d = 0;\n", k);
