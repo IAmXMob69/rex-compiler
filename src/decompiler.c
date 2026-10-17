@@ -1704,6 +1704,139 @@ static void emit_continue(D *d, const LCtx *lc, int depth) {
     emit(d, depth, "continue;");
 }
 
+/* "while (1) { B; if (X) { break; } }" with no continue is "do { B } while (!X);". */
+static int emit_tail_exit(D *d, int depth, const char *body) {
+    char i1[200] = "", i2[204];
+    for (int i = 0; i <= depth && strlen(i1) + 5 < sizeof i1; i++) strcat(i1, "    ");
+    snprintf(i2, sizeof i2, "%s    ", i1);
+    if (strstr(body, "continue;")) return 0;
+    size_t bl = strlen(body);
+    char tail[420];
+    snprintf(tail, sizeof tail, "%s    break;\n%s}\n", i1, i1);
+    size_t tl = strlen(tail);
+    if (bl < tl || strcmp(body + bl - tl, tail)) return 0;
+    /* start of the "if (X) {" line */
+    const char *end = body + bl - tl, *ln = end - 1;
+    while (ln > body && ln[-1] != '\n') ln--;
+    size_t il = strlen(i1);
+    if (strncmp(ln, i1, il) || strncmp(ln + il, "if (", 4) || end - ln < (long)(il + 7) || strncmp(end - 4, ") {\n", 4)) return 0;
+    char x[1100];
+    size_t xl = (size_t)((end - 4) - (ln + il + 4));
+    if (xl + 1 > sizeof x) return 0;
+    memcpy(x, ln + il + 4, xl); x[xl] = 0;
+    Ex c = ex_un("!", exf("(%s)", x));
+    char bb[1024];
+    emit(d, depth, "do {");
+    fwrite(body, 1, (size_t)(ln - body), d->out);
+    emit(d, depth, "} while (%s);", bare(c.s, bb, sizeof bb));
+    ex_free(c);
+    return 1;
+}
+
+/* Rotated loop: "if (C) { do { B } while (C); }" is "while (C) { B }".
+ * Same text means the same variables, so the rewrite is exact. */
+static int emit_rotated(D *d, int depth, const char *cond, const char *arm) {
+    char ind[200] = "";
+    for (int i = 0; i <= depth && strlen(ind) + 5 < sizeof ind; i++) strcat(ind, "    ");
+    size_t il = strlen(ind), al = strlen(arm);
+    char head[256], tail[1100];
+    snprintf(head, sizeof head, "%sdo {\n", ind);
+    snprintf(tail, sizeof tail, "%s} while (%s);\n", ind, cond);
+    size_t hl = strlen(head), tl = strlen(tail);
+    if (al < hl + tl || strncmp(arm, head, hl) || strcmp(arm + al - tl, tail)) return 0;
+    /* the do-while must be the whole arm: no other line at this depth */
+    for (const char *q = arm + hl; q < arm + al - tl; ) {
+        if (!strncmp(q, ind, il) && q[il] != ' ') return 0;
+        const char *nl = strchr(q, '\n');
+        if (!nl) return 0;
+        q = nl + 1;
+    }
+    emit(d, depth, "while (%s) {", cond);
+    for (const char *q = arm + hl; q < arm + al - tl; ) {
+        const char *nl = strchr(q, '\n');
+        fwrite(q + 4, 1, (size_t)(nl - q - 3), d->out);  /* one level shallower */
+        q = nl + 1;
+    }
+    emit(d, depth, "}");
+    return 1;
+}
+
+/* A quiet block (just cmp/test + br) reached only from one branch, sharing
+ * a target with it, folds into one condition: c && cy or c || cy. */
+static unsigned op_regs(const IrOperand *o) {
+    unsigned m = 0;
+    if (o->kind == IR_O_REG && o->reg >= 0 && o->reg < 16) m |= 1u << o->reg;
+    if (o->kind == IR_O_MEM) {
+        if (o->base >= 0 && o->base < 16) m |= 1u << o->base;
+        if (o->index >= 0 && o->index < 16) m |= 1u << o->index;
+    }
+    return m;
+}
+/* every register in m is written before it is read in block b */
+static int regs_dead(const IrBlock *b, unsigned m) {
+    for (int k = 0; k < b->ninsns && m; k++) {
+        const IrInsn *in = &b->insns[k];
+        unsigned rd = op_regs(&in->a) | op_regs(&in->b);
+        if (in->dst.kind == IR_O_MEM || in->op == IR_CMOV || (in->dst.kind == IR_O_REG && in->dst.width < 4)) rd |= op_regs(&in->dst);
+        if (in->op == IR_CALL || in->op == IR_RET || in->op == IR_SYSCALL) return 0;  /* may read anything */
+        if (rd & m) return 0;
+        if (in->dst.kind == IR_O_REG && in->dst.width >= 4 && in->op != IR_CMOV) m &= ~(1u << in->dst.reg);
+    }
+    return m == 0;
+}
+static int quiet_cond(const IrFunc *f, G *g, int y, const LCtx *lc, int stop) {
+    if (y < 0 || y >= g->n || y == stop || g->loop_exit[y] != -2) return 0;
+    if (lc && (y == lc->header || y == lc->exit)) return 0;
+    const IrBlock *b = &f->blocks[y];
+    if (b->ninsns < 2 || b->ninsns > 12 || b->insns[b->ninsns - 1].op != IR_BR) return 0;
+    unsigned wr = 0;
+    for (int k = 0; k < b->ninsns - 1; k++) {
+        IrOp op = b->insns[k].op;
+        if (op == IR_STORE || op == IR_CALL || op == IR_SYSCALL || op == IR_PUSH || op == IR_POP || op == IR_TRAP ||
+            op == IR_DIVS || op == IR_REMS || op == IR_DIVU || op == IR_REMU) return 0;
+        if (b->insns[k].dst.kind == IR_O_MEM) return 0;
+        if (b->insns[k].dst.kind == IR_O_REG) wr |= 1u << b->insns[k].dst.reg;
+    }
+    if (wr & ((1u << 4) | (1u << 5))) return 0;
+    /* registers written here must be dead (rewritten before read) in both targets */
+    for (int t = 0; t < 2 && wr; t++) {
+        int tb = thread(f, t ? b->insns[b->ninsns - 1].b.block : b->insns[b->ninsns - 1].a.block);
+        if (tb < 0 || tb >= f->nblocks) return 0;
+        if (!regs_dead(&f->blocks[tb], wr)) return 0;
+    }
+    int np = 0;
+    for (int x = 0; x < g->n; x++) for (int k = 0; k < g->nsucc[x]; k++) if (g->succ[x][k] == y) np++;
+    return np == 1;
+}
+static void merge_chain(D *d, const IrFunc *f, G *g, const LCtx *lc, int stop, Ex *c, int *ta, int *fb) {
+    for (int guard = 0; guard < 16; guard++) {
+        int y, isand;
+        if (quiet_cond(f, g, *ta, lc, stop)) { y = *ta; isand = 1; }
+        else if (quiet_cond(f, g, *fb, lc, stop)) { y = *fb; isand = 0; }
+        else return;
+        const IrBlock *b = &f->blocks[y];
+        int ya = thread(f, b->insns[b->ninsns - 1].a.block), yb = thread(f, b->insns[b->ninsns - 1].b.block);
+        int other = isand ? *fb : *ta;
+        if (ya != other && yb != other) {
+            if (isand && quiet_cond(f, g, *fb, lc, stop)) { y = *fb; isand = 0; b = &f->blocks[y];
+                ya = thread(f, b->insns[b->ninsns - 1].a.block); yb = thread(f, b->insns[b->ninsns - 1].b.block); other = *ta;
+                if (ya != other && yb != other) return; }
+            else return;
+        }
+        Snap sn; snap_take(d, &sn);
+        for (int k = 0; k < b->ninsns - 1; k++) step(d, &b->insns[k], d->depth, NULL);
+        Ex cy = br_cond(d, &b->insns[b->ninsns - 1], b);
+        snap_restore(d, &sn, 0);  /* the block's register writes are dead */
+        if (isand) {       /* ta = y: taken when c && (y goes on) */
+            if (yb == other) { *ta = ya; } else { cy = ex_un("!", cy); *ta = yb; }
+            *c = ex_bin("&&", *c, cy);
+        } else {           /* fb = y: taken when c || (y jumps to ta) */
+            if (ya == other) { *fb = yb; } else { cy = ex_un("!", cy); *fb = ya; }
+            *c = ex_bin("||", *c, cy);
+        }
+    }
+}
+
 static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx *lc, int depth, int enter) {
     if (depth > 48 || g_budget <= 0) {
         emit(d, depth, "// E402: control flow too tangled to structure here (block %d)", bi);
@@ -1760,11 +1893,19 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
                     ex_free(c);
                     snap_restore(d, &s, 0);
                 } else {
-                    emit(d, depth, "while (1) {");
+                    char *lb = NULL; size_t ln = 0;
+                    FILE *save = d->out, *mf = d->foreign ? open_memstream(&lb, &ln) : NULL;
+                    if (mf) d->out = mf;
                     Snap s; snap_take(d, &s);
                     structure(d, f, g, bi, bi, &inner, depth + 1, 1);
                     snap_restore(d, &s, 0);
-                    emit(d, depth, "}");
+                    if (mf) { fclose(mf); d->out = save; }
+                    if (!mf || !emit_tail_exit(d, depth, lb ? lb : "")) {
+                        emit(d, depth, "while (1) {");
+                        if (lb) fputs(lb, d->out);
+                        emit(d, depth, "}");
+                    }
+                    free(lb);
                 }
                 bi = inner.exit;
                 if (bi < 0) return;
@@ -1794,6 +1935,7 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
         char bb[1024];
         { int sw = try_switch(d, f, g, bi, lc, depth);
           if (sw) { ex_free(c); if (sw == 2) return; bi = g->ipdom[bi]; if (bi < 0 || bi >= g->n) return; continue; } }
+        if (d->foreign) merge_chain(d, f, g, lc, stop, &c, &ta, &fb);
         if (lc && ((ta == lc->exit && fb == lc->header) || (fb == lc->exit && ta == lc->header))) {
             if (ta != lc->exit) c = ex_un("!", c);
             emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb)); ex_free(c);
@@ -1825,11 +1967,17 @@ static void structure(D *d, const IrFunc *f, G *g, int bi, int stop, const LCtx 
         if (!*armA && !*armB) { /* both empty: keep side effects only */ }
         else if (!*armA) {
             c = ex_un("!", c);
-            emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb));
-            fputs(armB, d->out); emit(d, depth, "}");
+            const char *cs = bare(c.s, bb, sizeof bb);
+            if (!(d->foreign && emit_rotated(d, depth, cs, armB))) {
+                emit(d, depth, "if (%s) {", cs);
+                fputs(armB, d->out); emit(d, depth, "}");
+            }
         } else if (!*armB) {
-            emit(d, depth, "if (%s) {", bare(c.s, bb, sizeof bb));
-            fputs(armA, d->out); emit(d, depth, "}");
+            const char *cs = bare(c.s, bb, sizeof bb);
+            if (!(d->foreign && emit_rotated(d, depth, cs, armA))) {
+                emit(d, depth, "if (%s) {", cs);
+                fputs(armA, d->out); emit(d, depth, "}");
+            }
         } else {
             /* REX lowers if/else with the then-arm on the fall-through edge. */
             c = ex_un("!", c);
@@ -1923,6 +2071,47 @@ static int frame_size(const IrFunc *f) {
         }
     if (!need || far > (1 << 20)) return 0;
     return (int)((far + 256 + 15) & ~15LL);
+}
+
+/* Foreign code: arguments are the argument registers live at entry
+ * (read before written on some path). Calls read nothing here. */
+static void foreign_args(D *d) {
+    for (int i = 0; i < d->nfun; i++) {
+        Fun *fi = &d->fun[i];
+        if (fi->kind != 0) continue;
+        const IrFunc *f = &d->m->funcs[i];
+        int n = f->nblocks;
+        if (!n) continue;
+        unsigned *use = calloc((size_t)n, sizeof(unsigned)), *def = calloc((size_t)n, sizeof(unsigned)), *in = calloc((size_t)n, sizeof(unsigned));
+        if (!use || !def || !in) { free(use); free(def); free(in); continue; }
+        for (int b = 0; b < n; b++)
+            for (int k = 0; k < f->blocks[b].ninsns; k++) {
+                const IrInsn *x = &f->blocks[b].insns[k];
+                unsigned rd = 0, wr = 0;
+                if (x->op == IR_CALL) wr = (1u<<0)|(1u<<1)|(1u<<2)|(1u<<6)|(1u<<7)|(1u<<8)|(1u<<9)|(1u<<10)|(1u<<11);
+                else if (x->op != IR_SYSCALL && x->op != IR_PUSH && x->op != IR_POP) {
+                    rd = op_regs(&x->a) | op_regs(&x->b);
+                    if (x->dst.kind == IR_O_MEM || x->op == IR_CMOV || (x->dst.kind == IR_O_REG && x->dst.width < 4)) rd |= op_regs(&x->dst);
+                    if (x->op == IR_XOR && x->a.kind == IR_O_REG && x->b.kind == IR_O_REG && x->a.reg == x->b.reg) rd = 0;
+                    if (x->dst.kind == IR_O_REG && x->dst.width >= 4 && x->op != IR_CMOV && x->dst.reg >= 0 && x->dst.reg < 16) wr = 1u << x->dst.reg;
+                }
+                use[b] |= rd & ~def[b];
+                def[b] |= wr;
+            }
+        for (int changed = 1, it = 0; changed && it < 100; it++) {
+            changed = 0;
+            for (int b = n - 1; b >= 0; b--) {
+                unsigned out = 0;
+                for (int s = 0; s < f->blocks[b].nsucc; s++) { int t = f->blocks[b].succ[s]; if (t >= 0 && t < n) out |= in[t]; }
+                unsigned v = use[b] | (out & ~def[b]);
+                if (v != in[b]) { in[b] = v; changed = 1; }
+            }
+        }
+        int na = 0;
+        for (int a = 0; a < 6; a++) if (in[0] & (1u << ARG[a])) na = a + 1;
+        if (na > fi->nargs) fi->nargs = na;
+        free(use); free(def); free(in);
+    }
 }
 
 static void decompile_fun(D *d, Fun *fi) {
@@ -2033,6 +2222,7 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     d.fun = calloc((size_t)m->nfuncs, sizeof(Fun));
     d.nfun = m->nfuncs;
     classify(&d);
+    if (d.foreign) foreign_args(&d);
     blob_scan(&d);
 
 
