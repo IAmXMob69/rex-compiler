@@ -138,6 +138,49 @@ done; done
 # gcc -O0 non-PIE checks the bound on a stack slot
 gcc -O0 -no-pie -fno-pic -o "$T/sw" "$T/sw.c"
 ./rex match "$T/sw" -o "$T/sw.rex" >/dev/null 2>&1
+# a loop over a string with a char switch has the shape of REX's len helper;
+# in a gcc/clang program one that main reaches is the program's own code
+cat > "$T/sw2.c" <<'C'
+__attribute__((noinline)) int body(int x, int acc){
+    for (int i = 0; i < 3; i++) {
+        switch (x + i) {
+        case 0: acc += 3; break;
+        case 1: acc ^= 0x55; /* fallthrough */
+        case 2: acc = acc * 5 + 1; break;
+        case 3: { int j = 0; while (j < x) { acc += j * j; j++; } break; }
+        case 4: acc -= 7; break;
+        case 5: acc = (acc << 2) | 1; break;
+        case 6: acc = acc / 3 + 2; break;
+        case 7: continue;
+        case 8: acc += 100; break;
+        default: acc -= 1;
+        }
+        acc += i;
+    }
+    return acc;
+}
+__attribute__((noinline)) int off(int x){
+    switch (x) { case 10: return 1; case 11: return 4; case 12: return 9; case 13: return 16;
+                 case 14: return 25; case 15: return 36; case 16: return 49; default: return 0; }
+}
+__attribute__((noinline)) int chr(const char *s){
+    int n = 0;
+    for (; *s; s++) switch (*s) { case 'a': n += 1; break; case 'b': n += 20; break; case 'c': n *= 3; break;
+        case 'd': n -= 4; break; case 'e': n ^= 9; break; case 'f': n += 77; break; default: n++; }
+    return n;
+}
+int main(void){
+    unsigned s = 0;
+    for (int x = -2; x < 11; x++) s = s * 33 + (unsigned)body(x, x * 7);
+    for (int x = 5; x < 20; x++) s = s * 31 + (unsigned)off(x);
+    s += (unsigned)chr("abcdefabcxyzfed");
+    return (int)(s % 253);
+}
+C
+for cc in gcc clang; do for o in O0 O2; do
+    $cc -$o -pie -fpie -o "$T/sw2" "$T/sw2.c"
+    ./rex match "$T/sw2" -o "$T/sw2.rex" >/dev/null 2>&1
+done; done
 # a table whose bounds check another path skips is refused (tests/jt/skip.s);
 # the same code without the skip matches
 gcc -pie -o "$T/skip" tests/jt/skip.s

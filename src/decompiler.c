@@ -175,6 +175,7 @@ typedef struct {
     const char *builtin; /* print/putc/alloc/free/... */
     unsigned clob;  /* caller-saved registers this function may modify (transitively) */
     int reach;      /* reached from main by a call or a taken address */
+    int shape;      /* kind 3 by the shape of a REX string helper, not by a syscall */
 } Fun;
 
 typedef struct {
@@ -833,6 +834,9 @@ static void classify(D *d) {
             fi->nargs = 0;
             for (int i = 0; i < fi->nslots; i++) if (fi->slots[i].arg >= 0) fi->slots[i].arg = -1;
         }
+        /* REX's own string helpers, recognised by shape. In a gcc/clang program
+         * the same shape may be the program's own loop (a char switch over a
+         * string): see shape_reached below. */
         if (fi->kind == 0 && !has_sys) {
             int byte_ld = 0, cmp0 = 0, add1 = 0, n_byte = 0, has_mul = 0, ncall = 0;
             for (int b = 0; b < f->nblocks; b++)
@@ -848,10 +852,10 @@ static void classify(D *d) {
                     if (in->op == IR_CALL) ncall++;
                 }
             if (n_byte >= 2 && !has_mul && ncall == 0 && f->nblocks >= 3) {
-                fi->kind = 3; fi->builtin = "strcmp"; fi->nargs = 2;
+                fi->kind = 3; fi->builtin = "strcmp"; fi->nargs = 2; fi->shape = 1;
                 snprintf(fi->name, sizeof(fi->name), "strcmp");
             } else if (byte_ld && cmp0 && add1 && !has_mul && ncall == 0 && fi->nargs <= 1) {
-                fi->kind = 3; fi->builtin = "len"; fi->nargs = 1;
+                fi->kind = 3; fi->builtin = "len"; fi->nargs = 1; fi->shape = 1;
                 snprintf(fi->name, sizeof(fi->name), "len");
             }
         }
@@ -1098,6 +1102,23 @@ static void compute_reach(D *d) {
                 }
         }
     }
+}
+
+/* A gcc/clang program has none of REX's string helpers: a function shaped
+ * like one that main reaches is the program's own (a char loop) and is
+ * decompiled as such. One main never reaches stays hidden, as dead code
+ * the linker pulled in (clang's SSE memcpy). */
+static void foreign_args(D *d);
+static void shape_reached(D *d) {
+    int any = 0;
+    for (int i = 0; i < d->nfun; i++) {
+        Fun *fi = &d->fun[i];
+        if (fi->kind != 3 || !fi->shape || !fi->reach) continue;
+        fi->kind = 0; fi->builtin = NULL; fi->nargs = 0; fi->shape = 0;
+        snprintf(fi->name, sizeof(fi->name), "f%d", i);
+        any = 1;
+    }
+    if (any) { foreign_args(d); compute_clobbers(d); }
 }
 
 /* Library calls (puts, printf) reached through the PLT or a GOT slot. Counted
@@ -2990,6 +3011,7 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     g_struct_fail = 0; g_struct_fail_fn = NULL;
     g_libcalls = 0; g_libname[0] = 0;
     compute_reach(&d);
+    if (d.foreign) shape_reached(&d);
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 0) decompile_fun(&d, &d.fun[i]);
     for (int i = 0; i < d.nfun; i++) if (d.fun[i].kind == 2) decompile_fun(&d, &d.fun[i]);
     if (g_struct_fail) {
