@@ -25,6 +25,11 @@ typedef struct {
     int reg;                /* index register, or the register holding the loaded target */
     int byaddr;             /* 1: jmp *reg after mov reg, T(,i,8): compare reg with targets */
     int n;                  /* entries: index 0..n-1 */
+    uint64_t guard;         /* PIE table: first instruction after the bounds check (0: none) */
+    int breg;               /* PIE table: register still holding the table address at the jmp */
+    uint64_t base;          /* PIE table: the table address; entries are offsets from it */
+    int hoisted;            /* PIE table: breg was set by a lea outside the straight-line code */
+    uint64_t dep;           /* PIE table: earliest instruction before the ja the match relies on */
     uint64_t *targets;
 } CfgJumpTable;
 

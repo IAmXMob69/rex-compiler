@@ -126,6 +126,26 @@ for cc in gcc clang; do for o in O0 O2; do
     set +e; ./rex tosource "$T/cg" -o "$T/cg.rex" 2> "$T/cg.err"; rc=$?; set -e
     test $rc -ne 0 && grep -q "E401: fn_[0-9a-f]*: indirect jump" "$T/cg.err" && test ! -e "$T/cg.rex"
 done; done
+# PIE switch tables hold offsets from the table: read for gcc and clang at
+# -O0..-O2, with the dispatch lifted as a compare of the offset
+printf '%s\n' '__attribute__((noinline)) int sw(int x){ switch (x) { case 0: return 11; case 1: return 23; case 2: return 37; case 3: return 41;' \
+    '  case 4: return 59; case 5: return 61; case 6: return 79; case 7: return 83; default: return -1; } }' \
+    'int main(void){ int s = 0; for (int i = -2; i < 10; i++) s = s * 7 + sw(i); return s & 0xff; }' > "$T/sw.c"
+for cc in gcc clang; do for o in O0 O1 O2; do
+    $cc -$o -pie -fpie -o "$T/sw" "$T/sw.c"
+    ./rex match "$T/sw" -o "$T/sw.rex" >/dev/null 2>&1
+done; done
+# gcc -O0 non-PIE checks the bound on a stack slot
+gcc -O0 -no-pie -fno-pic -o "$T/sw" "$T/sw.c"
+./rex match "$T/sw" -o "$T/sw.rex" >/dev/null 2>&1
+# a table whose bounds check another path skips is refused (tests/jt/skip.s);
+# the same code without the skip matches
+gcc -pie -o "$T/skip" tests/jt/skip.s
+set +e; ./rex tosource "$T/skip" -o "$T/skip.rex" 2> "$T/skip.err"; rc=$?; set -e
+test $rc -ne 0 && grep -q "E401: .*past the bounds check" "$T/skip.err" && test ! -e "$T/skip.rex"
+sed 's/jz\t\.Lload/jz\t.Ldef/' tests/jt/skip.s > "$T/noskip.s"
+gcc -pie -o "$T/noskip" "$T/noskip.s"
+./rex match "$T/noskip" -o "$T/noskip.rex" >/dev/null 2>&1
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"

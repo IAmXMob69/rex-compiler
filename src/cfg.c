@@ -92,6 +92,7 @@ int cfg_find_func(const CfgProgram *p, uint64_t addr) {
 }
 
 static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, CfgJumpTable *jt);
+static int pie_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, const X86Insn *done, int ndone, CfgJumpTable *jt);
 enum { HIST = 12 };   /* straight-line history kept for table matching */
 
 /* Function symbols a jmp may tail-call: STT_FUNC entries in code, except gcc's
@@ -171,6 +172,10 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrLi
                     CfgJumpTable jt;
                     int h4 = nhist < 4 ? nhist : 4;
                     int jr = jump_table(e, in, hist + nhist - h4, h4, &jt);
+                    if (jr == 1) {
+                        int pr = pie_table(e, in, hist, nhist, ins, n - 1, &jt);
+                        if (pr != 1) jr = pr;
+                    }
                     const X86Operand *jo = &in->ops[0];
                     int tablelike = jo->kind == XO_MEM && jo->index != X86_NOREG && jo->scale == 8;
                     if (jr == 1 && !tablelike) {
@@ -322,6 +327,104 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrLi
         }
         if (bl->nsucc == 0 || bl->succ[0] != i + 1) bl->succ[bl->nsucc++] = i + 1;
     }
+    /* A PIE table's bounds check holds only if the code from it to the jmp is
+     * entered by falling through the ja: one block, no other way in. */
+    for (int k = 0; k < f->njt; k++) {
+        const CfgJumpTable *jt = &f->jt[k];
+        if (!jt->guard) continue;
+        int b = cfg_find_block(f, jt->guard), bad = b <= 0 || f->blocks[b].end <= jt->at;
+        for (int i = 0; i < nb && !bad; i++)
+            for (int s = 0; s < f->blocks[i].nsucc; s++)
+                if (f->blocks[i].succ[s] == b && i != b - 1) bad = 1;
+        for (int q = 0; q < f->njt && !bad; q++)
+            for (int t = 0; t < f->jt[q].n; t++) if (f->jt[q].targets[t] == jt->guard) bad = 1;
+        if (!bad) {
+            const CfgBlock *pb = &f->blocks[b - 1];
+            const X86Insn *ja = &f->insns[pb->first + pb->n - 1];
+            if (pb->end != jt->guard || ja->op != X86_JCC || ja->cc != 7) bad = 1;
+            /* what the match read before the ja (the bound, a zero-extending write,
+             * the slot the bounded value was saved to) is in the ja's own block */
+            if (jt->dep < pb->start) bad = 1;
+        }
+        if (!bad && jt->hoisted) {
+            /* The table address register was set by one lea outside the code
+             * evaluated: that lea must dominate the jmp, and nothing on any path
+             * from it to the jmp may write the register (no call either). */
+            int lb = -1, li = -1, jb = -1, nlea = 0;
+            for (int i = 0; i < nb; i++) {
+                const CfgBlock *bl = &f->blocks[i];
+                for (int q = bl->first; q < bl->first + bl->n; q++) {
+                    const X86Insn *w = &f->insns[q];
+                    if (w->addr == jt->at) jb = i;
+                    if (w->op == X86_LEA && w->ops[0].kind == XO_REG && w->ops[0].reg == jt->breg) {
+                        nlea++;
+                        if (w->ops[0].size == 8 && w->ops[1].kind == XO_MEM && w->ops[1].base == X86_RIP && w->ops[1].target == jt->base) { lb = i; li = q; }
+                    }
+                }
+            }
+            if (nlea != 1 || lb < 0 || jb < 0 || lb == jb) bad = 1;
+            char *fw = bad ? NULL : calloc((size_t)nb, 1), *bw = bad ? NULL : calloc((size_t)nb, 1);
+            int *stk = bad ? NULL : malloc((size_t)(nb + 1) * sizeof(int)), sp = 0;
+            if (!bad && (!fw || !bw || !stk)) bad = 1;
+            if (!bad) {
+                /* dominance: from the entry, avoiding the lea's block, the jmp is unreachable */
+                char *vis = fw;
+                if (lb != 0) {
+                    stk[sp++] = 0; vis[0] = 1;
+                    while (sp) {
+                        int v = stk[--sp];
+                        for (int s2 = 0; s2 < f->blocks[v].nsucc; s2++) {
+                            int t = f->blocks[v].succ[s2];
+                            if (t == lb || vis[t]) continue;
+                            vis[t] = 1; stk[sp++] = t;
+                        }
+                    }
+                    if (vis[jb]) bad = 1;
+                }
+                memset(fw, 0, (size_t)nb);
+            }
+            if (!bad) {
+                /* blocks on a path lea -> jmp: forward from the lea's block and backward from the jmp's, not through the lea's */
+                for (int s2 = 0; s2 < f->blocks[lb].nsucc; s2++) { int t = f->blocks[lb].succ[s2]; if (t != lb && !fw[t]) { fw[t] = 1; stk[sp++] = t; } }
+                while (sp) {
+                    int v = stk[--sp];
+                    for (int s2 = 0; s2 < f->blocks[v].nsucc; s2++) { int t = f->blocks[v].succ[s2]; if (t != lb && !fw[t]) { fw[t] = 1; stk[sp++] = t; } }
+                }
+                bw[jb] = 1; stk[sp++] = jb;
+                while (sp) {
+                    int v = stk[--sp];
+                    for (int u = 0; u < nb; u++) {
+                        if (u == lb || bw[u]) continue;
+                        for (int s2 = 0; s2 < f->blocks[u].nsucc; s2++) if (f->blocks[u].succ[s2] == v) { bw[u] = 1; stk[sp++] = u; break; }
+                    }
+                }
+                for (int i = 0; i < nb && !bad; i++) {
+                    if (i != lb && !(fw[i] && bw[i])) continue;
+                    const CfgBlock *bl = &f->blocks[i];
+                    int q0 = i == lb ? li + 1 : bl->first;
+                    for (int q = q0; q < bl->first + bl->n && !bad; q++) {
+                        const X86Insn *w = &f->insns[q];
+                        if (w->addr == jt->at) break;
+                        if (w->op == X86_CALL || w->op == X86_SYSCALL || w->op == X86_CQO || w->op == X86_IDIV || w->op == X86_DIV ||
+                            w->op == X86_XCHG || w->op == X86_POP || w->op == X86_LEAVE) {
+                            if (w->op == X86_CALL || w->op == X86_SYSCALL || w->op == X86_XCHG || w->op == X86_POP || w->op == X86_LEAVE ||
+                                jt->breg == 0 || jt->breg == 2) bad = 1;
+                        }
+                        if (w->nops >= 1 && w->ops[0].kind == XO_REG && !w->ops[0].xmm && w->ops[0].reg == jt->breg &&
+                            w->op != X86_CMP && w->op != X86_TEST && w->op != X86_PUSH) bad = 1;
+                    }
+                    /* the lea's block: if the path leaves it before the lea is reached again it
+                     * only matters after the lea, which is what was scanned */
+                }
+            }
+            free(fw); free(bw); free(stk);
+        }
+        if (bad) {
+            rex_errf(err, errlen, REX_E401_INDIRECT_JMP, "%s: indirect jump at 0x%llx (code can reach it past the bounds check)",
+                     f->name, (unsigned long long)jt->at);
+            goto out;
+        }
+    }
     rc = 0;
     goto out;
 oom:
@@ -398,6 +501,221 @@ static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, i
         jt->targets[k] = v;
     }
     jt->at = in->addr; jt->reg = reg; jt->n = n; jt->byaddr = byaddr;
+    return 0;
+}
+
+/* PIE switch tables hold 32-bit offsets from the table itself:
+ *   cmp $N-1, %eI; ja default; mov %eI,%eI; lea T(%rip),%rB;
+ *       movslq (%rB,%rI,4),%rD; add %rB,%rD; jmp *%rD               (gcc, clang -O1+)
+ *   mov %rI,M; sub $N-1,%rI; ja default; mov M,%rI; lea T(%rip),%rB;
+ *       movslq (%rB,%rI,4),%rI; add %rB,%rI; jmp *%rI               (clang -O0)
+ *   cmpl $N-1,M; ja default; mov M,%eax; lea 0(,%rax,4),%rS; lea T(%rip),%rX;
+ *       mov (%rS,%rX),%eax; cltq; lea T(%rip),%rB; add %rB,%rax; jmp *%rax   (gcc -O0)
+ * and the non-PIE tables the matcher above does not take, whose bound is on a
+ * stack slot or a register written in the same block:
+ *   cmpl $N-1,M; ja default; mov M,%eax; mov T(,%rax,8),%rax; jmp *%rax  (gcc -O0)
+ *   cmp $N-1,%al; ja default; movzbl %al,%eax; jmp *T(,%rax,8)      (char switch)
+ *   cmp $N-1,%edi; ja default; mov %edi,%r8d; jmp *T(,%r8,8)        (clang -O2)
+ * The straight-line code from the ja to the jmp is evaluated symbolically:
+ * every register is the bounded value V (zero-extended or only its low half),
+ * 4*V, the table address T, a 32-bit entry T[V] (before or after sign
+ * extension), T + T[V], or unknown. The jmp must go to T + T[V] with V bounded
+ * by the ja; nothing in between may store, call or branch. Returns 0 and fills
+ * jt (byaddr: the lift compares the target itself), 1 unknown shape, 2 table
+ * not read-only, 3 bad entry. The caller checks no path skips the ja. */
+enum { PV_UNK, PV_V32, PV_V64, PV_V4, PV_TB, PV_E32, PV_E64, PV_TGT, PV_ABS, PV_V8, PV_V16 };
+static int same_mem(const X86Operand *a, const X86Operand *b) {
+    return a->kind == XO_MEM && b->kind == XO_MEM && a->base == b->base && a->index == b->index &&
+           a->scale == b->scale && a->disp == b->disp && a->base != X86_RIP;
+}
+static int pie_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, const X86Insn *done, int ndone, CfgJumpTable *jt) {
+    memset(jt, 0, sizeof(*jt));
+    const X86Operand *jo = &in->ops[0];
+    int memform = jo->kind == XO_MEM && jo->base == X86_NOREG && jo->index >= 0 && jo->index < 16 && jo->scale == 8 && jo->disp > 0;
+    if (!memform && (jo->kind != XO_REG || jo->size != 8)) return 1;
+    int ka = -1;
+    for (int k = nhist - 1; k >= 1; k--) {
+        if (hist[k].op == X86_JCC) { if (hist[k].cc == 7) ka = k; break; }
+    }
+    if (ka < 1) return 1;
+    const X86Insn *bc = &hist[ka - 1];
+    if ((bc->op != X86_CMP && bc->op != X86_SUB) || bc->ops[1].kind != XO_IMM || bc->ops[1].imm < 0 || bc->ops[1].imm > 1024) return 1;
+    int n = (int)bc->ops[1].imm + 1, vsz = bc->ops[0].size;
+    uint64_t dep = bc->addr;
+    int st[16]; uint64_t tb[16];
+    int hoist = -1;
+    for (int r = 0; r < 16; r++) { st[r] = PV_UNK; tb[r] = 0; }
+    X86Operand vmem; int has_vmem = 0, vmsz = 0, vmzx = 0;   /* slot holding V: its size; 8 bytes of zero-extended V */
+    if (bc->op == X86_CMP && bc->ops[0].kind == XO_REG && !bc->ops[0].xmm && !bc->ops[0].high8 && (vsz == 1 || vsz == 2)) {
+        st[bc->ops[0].reg] = vsz == 1 ? PV_V8 : PV_V16;        /* char/short switch: made whole by movzx */
+    } else if (bc->op == X86_CMP && bc->ops[0].kind == XO_REG && !bc->ops[0].xmm && !bc->ops[0].high8 && vsz >= 4) {
+        int vr = bc->ops[0].reg, zx = vsz == 8;
+        /* a 32-bit write zero-extends: if that is how the register got its
+         * value, the bounded low half is the whole register */
+        for (int k = ka - 2; k >= 0 && !zx; k--) {
+            const X86Insn *w = &hist[k];
+            if (w->op == X86_CMP || w->op == X86_TEST || w->op == X86_PUSH || w->nops < 1) continue;
+            if (w->op == X86_JMP || w->op == X86_JCC || w->op == X86_CALL || w->op == X86_XCHG || w->op == X86_CQO ||
+                w->op == X86_IDIV || w->op == X86_DIV || w->op == X86_POP) break;
+            if (w->ops[0].kind == XO_REG && !w->ops[0].xmm && w->ops[0].reg == vr) {
+                if (w->ops[0].size == 4 && !w->ops[0].high8) { zx = 1; dep = w->addr; }
+                break;
+            }
+        }
+        st[vr] = zx ? PV_V64 : PV_V32;
+    }
+    else if (bc->op == X86_CMP && bc->ops[0].kind == XO_MEM && bc->ops[0].base != X86_RIP && vsz >= 4) { vmem = bc->ops[0]; has_vmem = 1; vmsz = vsz; }
+    else if (bc->op == X86_SUB && bc->ops[0].kind == XO_REG && ka >= 2 && vsz >= 4) {
+        /* the value before the sub, kept in memory: stored from the register
+         * itself, or from a 32-bit copy of it (which zero-extends) */
+        const X86Insn *sv = &hist[ka - 2];
+        int sr = bc->ops[0].reg;
+        if (sv->op != X86_MOV || sv->ops[0].kind != XO_MEM || sv->ops[0].base == X86_RIP || sv->ops[1].kind != XO_REG || sv->ops[1].xmm) return 1;
+        if (sv->ops[1].reg == sr && sv->ops[0].size == vsz) { vmsz = vsz; }
+        else if (ka >= 3 && vsz == 4 && sv->ops[0].size == 8 && hist[ka - 3].op == X86_MOV && hist[ka - 3].ops[0].kind == XO_REG &&
+                 hist[ka - 3].ops[0].reg == sv->ops[1].reg && hist[ka - 3].ops[0].size == 4 && hist[ka - 3].ops[1].kind == XO_REG &&
+                 hist[ka - 3].ops[1].reg == sr && hist[ka - 3].ops[1].size == 4) { vmsz = 8; vmzx = 1; }
+        else return 1;
+        dep = vmzx ? hist[ka - 3].addr : sv->addr;
+        vmem = sv->ops[0]; has_vmem = 1;
+    } else return 1;
+    for (int k = ka + 1; k < nhist; k++) {
+        const X86Insn *x = &hist[k];
+        const X86Operand *d = &x->ops[0], *s = &x->ops[1];
+        if (x->op == X86_NOP || x->op == X86_ENDBR) continue;
+        if (x->op == X86_JMP || x->op == X86_JCC || x->op == X86_CALL || x->op == X86_RET || x->op == X86_PUSH ||
+            x->op == X86_POP || x->op == X86_LEAVE || x->op == X86_XCHG || x->op == X86_SYSCALL || x->op == X86_SSE ||
+            x->op == X86_CQO || x->op == X86_IDIV || x->op == X86_DIV) return 1;
+        if (x->nops >= 1 && d->kind == XO_MEM && x->op != X86_CMP && x->op != X86_TEST) return 1;   /* a store */
+        if (x->nops < 1 || d->kind != XO_REG || x->op == X86_CMP || x->op == X86_TEST) continue;
+        if (d->xmm || d->high8 || d->size < 4 || d->reg < 0 || d->reg > 15) {
+            if (d->reg >= 0 && d->reg < 16 && !d->xmm) st[d->reg] = PV_UNK;
+            continue;
+        }
+        int nv = PV_UNK; uint64_t nt = 0;
+        if (x->op == X86_MOVZX && s->kind == XO_REG && !s->xmm && !s->high8 && s->reg >= 0 && s->reg < 16 &&
+            ((st[s->reg] == PV_V8 && s->size == 1) || (st[s->reg] == PV_V16 && s->size == 2))) {
+            nv = PV_V64;                              /* movzbl/movzwl of the bounded byte or word */
+        } else if (x->op == X86_MOV && s->kind == XO_REG && !s->xmm && s->reg >= 0 && s->reg < 16) {
+            int ss = st[s->reg];
+            if ((ss == PV_V32 || ss == PV_V64) && d->size >= 4 && s->size >= 4) nv = PV_V64;
+            else if (d->size == 8 && s->size == 8) { nv = ss; nt = tb[s->reg]; }
+        } else if (x->op == X86_MOV && has_vmem && same_mem(s, &vmem) &&
+                   (s->size == vmsz ? (vmsz == vsz || vmzx) : (s->size == 4 && vmzx))) {
+            nv = PV_V64;                              /* reload of the bounded value; 32-bit loads zero-extend */
+        } else if (x->op == X86_LEA && s->kind == XO_MEM && s->base == X86_RIP && d->size == 8) {
+            nv = PV_TB; nt = s->target;
+        } else if (x->op == X86_LEA && s->kind == XO_MEM && s->base == X86_NOREG && s->index >= 0 && s->index < 16 &&
+                   st[s->index] == PV_V64 && s->scale == 4 && s->disp == 0 && d->size == 8) {
+            nv = PV_V4;
+        } else if ((x->op == X86_MOV && d->size == 4 && s->size == 4) || (x->op == X86_MOVSX && d->size == 8 && s->size == 4)) {
+            if (s->kind == XO_MEM && s->base >= 0 && s->base < 16 && s->index >= 0 && s->index < 16 && s->disp == 0) {
+                int b = st[s->base], i = st[s->index];
+                uint64_t t = 0;
+                if (b == PV_UNK && i == PV_V64 && s->scale == 4) {
+                    /* table address set outside this straight-line code (hoisted out
+                     * of a loop): the one lea into that register decoded so far. The
+                     * caller proves it is the only write and that it dominates. */
+                    uint64_t ht = 0; int cnt = 0;
+                    for (int q = 0; q < ndone; q++) {
+                        const X86Insn *w = &done[q];
+                        if (w->op == X86_LEA && w->ops[0].kind == XO_REG && w->ops[0].reg == s->base && w->ops[0].size == 8 &&
+                            w->ops[1].kind == XO_MEM && w->ops[1].base == X86_RIP) { ht = w->ops[1].target; cnt++; }
+                    }
+                    if (cnt == 1 && ht) { st[s->base] = PV_TB; tb[s->base] = ht; b = PV_TB; hoist = s->base; }
+                }
+                if (b == PV_TB && i == PV_V64 && s->scale == 4) t = tb[s->base];
+                else if (s->scale == 1 && b == PV_TB && i == PV_V4) t = tb[s->base];
+                else if (s->scale == 1 && b == PV_V4 && i == PV_TB) t = tb[s->index];
+                if (t) { nv = x->op == X86_MOVSX ? PV_E64 : PV_E32; nt = t; }
+            } else if (x->op == X86_MOVSX && s->kind == XO_REG && s->reg == d->reg && st[s->reg] == PV_E32) {
+                nv = PV_E64; nt = tb[s->reg];     /* cltq */
+            }
+        } else if (x->op == X86_MOV && d->size == 8 && s->kind == XO_MEM && s->size == 8 && s->base == X86_NOREG &&
+                   s->index >= 0 && s->index < 16 && st[s->index] == PV_V64 && s->scale == 8 && s->disp > 0) {
+            nv = PV_ABS; nt = (uint64_t)s->disp;     /* non-PIE: 8-byte absolute entries */
+        } else if (x->op == X86_ADD && s->kind == XO_REG && d->size == 8 && s->size == 8 && s->reg >= 0 && s->reg < 16) {
+            int a = st[d->reg], b = st[s->reg];
+            if (a == PV_E64 && b == PV_TB && tb[d->reg] == tb[s->reg]) { nv = PV_TGT; nt = tb[s->reg]; }
+            else if (a == PV_TB && b == PV_E64 && tb[d->reg] == tb[s->reg]) { nv = PV_TGT; nt = tb[d->reg]; }
+        }
+        st[d->reg] = nv; tb[d->reg] = nt;
+    }
+    if (memform) {
+        /* jmp *T(,%rI,8): the old compare-the-index lift, I being the whole bounded value */
+        if (st[jo->index] != PV_V64) return 1;
+        uint64_t t = (uint64_t)jo->disp;
+        const RexShdr *sec = NULL;
+        for (int i = 0; i < e->nsh; i++) {
+            const RexShdr *sh = &e->sh[i];
+            if ((sh->flags & 2) && !(sh->flags & 1) && sh->type != 8 && t >= sh->addr && t + 8 * (uint64_t)n <= sh->addr + sh->size) sec = sh;
+        }
+        if (!sec) return 2;
+        uint64_t off = sec->offset + (t - sec->addr);
+        if (off + 8 * (uint64_t)n > e->size) return 2;
+        jt->targets = malloc((size_t)n * sizeof(uint64_t));
+        if (!jt->targets) return 3;
+        for (int k = 0; k < n; k++) {
+            uint64_t v;
+            memcpy(&v, e->data + off + 8 * (uint64_t)k, 8);
+            size_t av;
+            if (!rex_elf_code_at(e, v, &av) || v > 0x7fffffff) { free(jt->targets); jt->targets = NULL; return 3; }
+            jt->targets[k] = v;
+        }
+        jt->at = in->addr; jt->reg = jo->index; jt->n = n; jt->byaddr = 0; jt->guard = hist[ka].addr + (uint64_t)hist[ka].size;
+        jt->breg = -1; jt->dep = dep;
+        return 0;
+    }
+    int r = in->ops[0].reg;
+    if (r >= 0 && r < 16 && st[r] == PV_ABS) {
+        uint64_t t = tb[r];
+        const RexShdr *sec = NULL;
+        for (int i = 0; i < e->nsh; i++) {
+            const RexShdr *sh = &e->sh[i];
+            if ((sh->flags & 2) && !(sh->flags & 1) && sh->type != 8 && t >= sh->addr && t + 8 * (uint64_t)n <= sh->addr + sh->size) sec = sh;
+        }
+        if (!sec) return 2;
+        uint64_t off = sec->offset + (t - sec->addr);
+        if (off + 8 * (uint64_t)n > e->size) return 2;
+        jt->targets = malloc((size_t)n * sizeof(uint64_t));
+        if (!jt->targets) return 3;
+        for (int k = 0; k < n; k++) {
+            uint64_t v;
+            memcpy(&v, e->data + off + 8 * (uint64_t)k, 8);
+            size_t av;
+            if (!rex_elf_code_at(e, v, &av) || v > 0x7fffffff) { free(jt->targets); jt->targets = NULL; return 3; }
+            jt->targets[k] = v;
+        }
+        jt->at = in->addr; jt->reg = r; jt->n = n; jt->byaddr = 1; jt->guard = hist[ka].addr + (uint64_t)hist[ka].size;
+        jt->breg = -1; jt->dep = dep;
+        return 0;
+    }
+    if (r < 0 || r > 15 || st[r] != PV_TGT) return 1;
+    uint64_t t = tb[r];
+    /* the lift compares target - table, so the table address must still be in a register */
+    int breg = -1;
+    for (int q = 0; q < 16; q++) if (q != r && st[q] == PV_TB && tb[q] == t) { breg = q; break; }
+    if (breg < 0) return 1;
+    const RexShdr *sec = NULL;
+    for (int i = 0; i < e->nsh; i++) {
+        const RexShdr *sh = &e->sh[i];
+        if ((sh->flags & 2) && !(sh->flags & 1) && sh->type != 8 && t >= sh->addr && t + 4 * (uint64_t)n <= sh->addr + sh->size) sec = sh;
+    }
+    if (!sec) return 2;
+    uint64_t off = sec->offset + (t - sec->addr);
+    if (off + 4 * (uint64_t)n > e->size) return 2;
+    jt->targets = malloc((size_t)n * sizeof(uint64_t));
+    if (!jt->targets) return 3;
+    for (int k = 0; k < n; k++) {
+        int32_t v;
+        memcpy(&v, e->data + off + 4 * (uint64_t)k, 4);
+        uint64_t a = t + (uint64_t)(int64_t)v;
+        size_t av;
+        if (!rex_elf_code_at(e, a, &av) || a > 0x7fffffff) { free(jt->targets); jt->targets = NULL; return 3; }
+        jt->targets[k] = a;
+    }
+    jt->at = in->addr; jt->reg = r; jt->n = n; jt->byaddr = 1; jt->guard = hist[ka].addr + (uint64_t)hist[ka].size;
+    jt->breg = breg; jt->base = t; jt->hoisted = breg == hoist; jt->dep = dep;
     return 0;
 }
 

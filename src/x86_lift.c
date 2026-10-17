@@ -363,6 +363,38 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
              * check before the jmp keeps the index in 0..n-1, so the last entry
              * is unconditional. Extra blocks are appended after the CFG blocks. */
             int saved = l->block;
+            if (jt->guard && jt->breg >= 0) {
+                /* PIE table: the target is T + entry, and T is data, which the
+                 * decompiler relocates. Compare the entry instead (target - T)
+                 * and put the target back before each jump, so the register
+                 * keeps its machine value. */
+                IrOperand rd = ir_reg(jt->reg, 8), rb = ir_reg(jt->breg, 8);
+                i = emit(l, IR_SUB); i->dst = rd; i->a = rd; i->b = rb;
+                for (int k = 0; k < jt->n; k++) {
+                    int tb = cfg_find_block(l->cf, jt->targets[k]);
+                    if (tb < 0) { lfail(l, "jump table target not in function"); break; }
+                    int ab = ir_block_add(l->f, in->addr);
+                    if (ab < 0) { lfail(l, "out of memory"); break; }
+                    if (k == jt->n - 1) { i = emit(l, IR_JMP); i->a = ir_blk(ab); }
+                    else {
+                        i = emit(l, IR_CMP); i->a = rd; i->b = ir_imm((int64_t)(jt->targets[k] - jt->base), 4);
+                        int nb = ir_block_add(l->f, in->addr);
+                        if (nb < 0) { lfail(l, "out of memory"); break; }
+                        i = emit(l, IR_BR); i->cc = IR_CC_EQ; i->a = ir_blk(ab); i->b = ir_blk(nb);
+                        l->block = ab;
+                        i = emit(l, IR_ADD); i->dst = rd; i->a = rd; i->b = rb;
+                        i = emit(l, IR_JMP); i->a = ir_blk(tb);
+                        l->block = nb;
+                        continue;
+                    }
+                    l->block = ab;
+                    i = emit(l, IR_ADD); i->dst = rd; i->a = rd; i->b = rb;
+                    i = emit(l, IR_JMP); i->a = ir_blk(tb);
+                }
+                l->block = saved;
+                l->flags = FL_NONE;
+                break;
+            }
             for (int k = 0; k < jt->n; k++) {
                 int tb = cfg_find_block(l->cf, jt->targets[k]);
                 if (tb < 0) { lfail(l, "jump table target not in function"); break; }
