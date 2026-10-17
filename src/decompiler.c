@@ -2451,6 +2451,91 @@ static char *strip_dead_temps(const char *in) {
     return buf;
 }
 
+/* Goto-free fallback for control flow the region structurer cannot nest (it
+ * would recurse without end). Each block becomes one arm of a dispatch loop
+ * keyed on a state variable st: the arm runs the block's statements, flushes its
+ * register variables, then sets st to the next block. That simulates the CFG
+ * exactly. It is used only where it is provably exact: every conditional branch
+ * tests flags set in its own block, no SSE value is live across a block, and the
+ * stack pointer never moves, so every block sees the same frame. Anything else
+ * keeps the clean E402 refusal. */
+static int dispatch_safe(const IrFunc *f) {
+    for (int bi = 0; bi < f->nblocks; bi++) {
+        const IrBlock *b = &f->blocks[bi];
+        int nb = b->ninsns;
+        const IrInsn *t = nb ? &b->insns[nb - 1] : NULL;
+        int nbody = (t && ir_is_terminator(t->op)) ? nb - 1 : nb;
+        if (t && t->op == IR_TRAP) return 0;
+        if (t && t->op == IR_BR) {
+            int own = 0;
+            for (int k = 0; k < nbody; k++)
+                if (b->insns[k].op == IR_CMP || b->insns[k].op == IR_TEST) own = 1;
+            if (!own) return 0;                       /* flags inherited from another block */
+        }
+        unsigned xw = 0;                              /* xmm pseudo-regs 16..47 written so far */
+        for (int k = 0; k < nb; k++) {
+            const IrInsn *in = &b->insns[k];
+            if (in->op == IR_PUSH || in->op == IR_POP) return 0;          /* stack pointer moves */
+            if (in->dst.kind == IR_O_REG && in->dst.reg == 4) return 0;
+            const IrOperand *rd[2] = { &in->a, &in->b };
+            for (int o = 0; o < 2; o++)
+                if (rd[o]->kind == IR_O_REG && rd[o]->reg >= 16 && rd[o]->reg < 48 &&
+                    !(xw & (1u << (rd[o]->reg - 16)))) return 0;           /* SSE value crosses a block */
+            if (in->dst.kind == IR_O_REG && in->dst.reg >= 16 && in->dst.reg < 48)
+                xw |= 1u << (in->dst.reg - 16);
+        }
+    }
+    return 1;
+}
+
+static void emit_dispatch(D *d, const IrFunc *f, int depth) {
+    flush_decls(d);
+    materialize(d, depth);                            /* parameters become register variables */
+    emit(d, depth, "let st = 0;");
+    emit(d, depth, "while (1) {");
+    for (int bi = 0; bi < f->nblocks; bi++) {
+        const IrBlock *b = &f->blocks[bi];
+        /* At block entry every register holds its variable; the frame pointer keeps its value. */
+        for (int r = 0; r < 16; r++) {
+            if (r == 4 || (r == 5 && d->frame && d->fp)) continue;
+            if (d->has[r]) ex_free(d->reg[r]);
+            d->has[r] = 0;
+        }
+        for (int r = 0; r < 32; r++) { if (d->xhas[r]) ex_free(d->xreg[r]); d->xhas[r] = 0; }
+        d->cmp = NULL;
+        if (d->cmp_snap) { ex_free(d->cmpa); ex_free(d->cmpb); d->cmp_snap = 0; }
+        emit(d, depth + 1, "%s (st == %d) {", bi ? "} else if" : "if", bi);
+        int nb = b->ninsns;
+        const IrInsn *t = nb ? &b->insns[nb - 1] : NULL;
+        int isterm = t && ir_is_terminator(t->op);
+        int nbody = isterm ? nb - 1 : nb;
+        for (int k = 0; k < nbody; k++) step(d, &b->insns[k], depth + 2, NULL);
+        if (t && t->op == IR_RET) {
+            emit_ret(d, depth + 2);
+        } else if (t && t->op == IR_BR) {
+            materialize(d, depth + 2);
+            Ex c = br_cond(d, t, b);
+            char bb[1024];
+            emit(d, depth + 2, "if (%s) {", bare(c.s, bb, sizeof bb));
+            emit(d, depth + 3, "st = %d;", t->a.block);
+            emit(d, depth + 2, "} else {");
+            emit(d, depth + 3, "st = %d;", t->b.block);
+            emit(d, depth + 2, "}");
+            ex_free(c);
+        } else {
+            materialize(d, depth + 2);
+            int nx = -1;
+            if (t && t->op == IR_JMP && t->a.kind == IR_O_BLOCK) nx = t->a.block;
+            else if (b->nsucc >= 1) nx = b->succ[0];
+            else if (!isterm && bi + 1 < f->nblocks) nx = bi + 1;
+            if (nx >= 0) emit(d, depth + 2, "st = %d;", nx);
+            else emit_ret(d, depth + 2);
+        }
+    }
+    emit(d, depth + 1, "}");
+    emit(d, depth, "}");
+}
+
 static void decompile_fun(D *d, Fun *fi) {
     if (fi->kind == 1 || fi->kind == 3) return;
     const IrFunc *f = NULL;
@@ -2474,6 +2559,33 @@ static void decompile_fun(D *d, Fun *fi) {
     d->fp = d->foreign ? frame_has_fp(f) : 0;
     d->fixed_x = -1;
     if (g_build(d, f, &g) == 0) {
+        /* Trial structuring: when the region structurer cannot nest this
+         * function, fall back to the exact dispatch loop if that is safe here.
+         * A function that structures normally is never touched. */
+        int dispatch = 0;
+        if (d->foreign) {
+            /* The passes below do not reset the compare snapshot, so save it and
+             * put it back: the trial must leave their input exactly as it was. */
+            int sv_snap = d->cmp_snap;
+            Ex sv_a = { NULL }, sv_b = { NULL };
+            if (sv_snap) { sv_a = ex(d->cmpa.s); sv_b = ex(d->cmpb.s); }
+            for (int i = 0; i < 16; i++) { if (d->has[i]) ex_free(d->reg[i]); d->has[i] = 0; }
+            for (int i = 0; i < 32; i++) { if (d->xhas[i]) ex_free(d->xreg[i]); d->xhas[i] = 0; }
+            while (d->nstk) ex_free(d->stk[--d->nstk]);
+            for (int a = 0; a < fi->nargs; a++) setr(d, ARG[a], exf("%c", 'a' + a));
+            if (d->frame) { setr(d, 4, exf("(fr + %d)", d->frame)); if (d->fp) setr(d, 5, exf("(fr + %d)", d->frame)); }
+            d->cmp = NULL; memset(d->declared, 0, sizeof d->declared); d->flat = 1; d->nx = 0;
+            g_budget = 20000; g_struct_fail = 0;
+            char *tb = NULL; size_t tn = 0;
+            FILE *sv = d->out, *tm = open_memstream(&tb, &tn);
+            if (tm) { d->out = tm; structure(d, f, &g, 0, -1, NULL, 1, 0); fclose(tm); d->out = sv; }
+            free(tb);
+            if (g_struct_fail && dispatch_safe(f)) dispatch = 1;
+            g_struct_fail = 0;
+            d->vused = 0;
+            if (d->cmp_snap) { ex_free(d->cmpa); ex_free(d->cmpb); }
+            d->cmp_snap = sv_snap; d->cmpa = sv_a; d->cmpb = sv_b;
+        }
         /* Pass 1 (discarded) collects hints; pass 2 prints. */
         int hdr_nx = 0;
         unsigned hdr_vu = 0;
@@ -2493,7 +2605,7 @@ static void decompile_fun(D *d, Fun *fi) {
                 FILE *save = d->out, *m = open_memstream(&buf, &n);
                 if (!m) continue;
                 d->out = m;
-                structure(d, f, &g, 0, -1, NULL, 1, 0);
+                if (dispatch) emit_dispatch(d, f, 1); else structure(d, f, &g, 0, -1, NULL, 1, 0);
                 fclose(m); free(buf);
                 d->out = save;
                 finish_hints(d, f, fi);
@@ -2514,7 +2626,7 @@ static void decompile_fun(D *d, Fun *fi) {
                 memset(d->written, 0, sizeof d->written);
                 d->nx = 0;
                 if (m) d->out = m;
-                structure(d, f, &g, 0, -1, NULL, 1, 0);
+                if (dispatch) emit_dispatch(d, f, 1); else structure(d, f, &g, 0, -1, NULL, 1, 0);
                 if (m) {
                     fclose(m);
                     d->out = save;

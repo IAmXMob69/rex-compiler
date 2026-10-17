@@ -132,12 +132,20 @@ build gcc O2 entities
 # this match stays green only if the recovered lanes equal the real CPU.
 gcc -O0 $G -o "$T/ssecheck" tests/ssecheck.c
 ./rex match "$T/ssecheck" -o "$T/ssecheck.rex" >/dev/null
-# statemachine gcc -O2: gcc's dispatch overruns the structurer budget. The
-# whole decompile must refuse cleanly with a plain line and E402 and write no
-# file, instead of emitting a half-structured body full of broken stubs.
+# statemachine gcc -O2: the region structurer cannot nest gcc's dispatch, so
+# the decompiler falls back to an exact dispatch loop (a state variable st and
+# one arm per block). It must round-trip, and it must use that loop.
 build gcc O2 statemachine
-! ./rex tosource "$T/statemachine_gcc_O2" -o "$T/sm2.rex" 2> "$T/sm2.err"
-grep -q "too tangled" "$T/sm2.err" && grep -q "E402" "$T/sm2.err"
-test ! -f "$T/sm2.rex"
+./rex match "$T/statemachine_gcc_O2" -o "$T/sm2.rex" >/dev/null
+grep -q "let st = 0;" "$T/sm2.rex"
+# recursive fib at gcc -O2 is still too tangled, and its stack pointer moves
+# (prologue push/pop), so the dispatch loop is not exact there either. The whole
+# decompile must refuse cleanly with a plain line and E402 and write no file.
+printf '%s\n' '#include "rt.h"' 'int fib(int n){if(n<2)return n;return fib(n-1)+fib(n-2);}' \
+    'int main(void){return fib(10);}' > "$T/recur.c"
+gcc -O2 $G -o "$T/recur_gcc_O2" "$T/recur.c"
+! ./rex tosource "$T/recur_gcc_O2" -o "$T/rc2.rex" 2> "$T/rc2.err"
+grep -q "too tangled" "$T/rc2.err" && grep -q "E402" "$T/rc2.err"
+test ! -f "$T/rc2.rex"
 rm -rf "$T"
 echo "game: ok"
