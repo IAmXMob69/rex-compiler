@@ -285,6 +285,18 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
     for (int k = 0; k < bl->ninsns; k++) {
         if (g->bad) return;
         const IrInsn *in = &bl->insns[k];
+        {
+            /* the lift's xmm halves (registers 16..47) have no encoding here yet:
+             * taken as a GPR number they aliased r8 and lost data */
+            const IrOperand *ops[3] = { &in->dst, &in->a, &in->b };
+            int sse = 0;
+            for (int j = 0; j < 3; j++) {
+                const IrOperand *o = ops[j];
+                if (o->kind == IR_O_REG && (o->reg < 0 || o->reg > 15)) sse = 1;
+                if (o->kind == IR_O_MEM && (o->base > 15 || o->index > 15)) sse = 1;
+            }
+            if (sse) { cgfail(g, "SSE registers are not rebuilt yet"); break; }
+        }
         switch (in->op) {
         case IR_NOP: break;
         case IR_MOV: gen_mov(g, &in->dst, &in->a); break;

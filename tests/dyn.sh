@@ -239,6 +239,11 @@ printf '%s\n' '__attribute__((noinline)) int mb(unsigned char a, unsigned char b
 gcc -O2 -no-pie -fno-pic -o "$T/drop" "$T/drop.c"
 set +e; ./rex tosource "$T/drop" -o "$T/drop.rex" 2> "$T/drop.err"; rc=$?; set -e
 test $rc -ne 0 && grep -q "E300: mb at 0x[0-9a-f]*: 8-bit one-operand mul" "$T/drop.err"
+# xmm values have no encoding in the rebuild yet: refused with E500, never
+# aliased onto a general register (tests/dec/ssefs.c)
+gcc -O3 -static -nostdlib -fno-pic -fno-stack-protector -o "$T/ssefs" tests/dec/ssefs.c
+set +e; ./rex compare "$T/ssefs" -o "$T/ssefs.out" > /dev/null 2> "$T/ssefs.err"; rc=$?; set -e
+test $rc -ne 0 && grep -q "E500: SSE registers are not rebuilt yet" "$T/ssefs.err"
 # a table whose bounds check another path skips is refused (tests/jt/skip.s);
 # the same code without the skip matches
 gcc -pie -o "$T/skip" tests/jt/skip.s
