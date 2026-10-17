@@ -553,7 +553,9 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
         const char *n = slot_name(d->cur, 1000000 + (int)o->disp);
         if (n) return ex(n);
     }
-    if (o->base == 5 && o->index == IR_NOREG) {
+    /* In foreign code without a frame pointer, rbp is a register like any other. */
+    int rbpf = o->base == 5 && (!d->foreign || d->fp);
+    if (rbpf && o->index == IR_NOREG) {
         const char *n = slot_name(d->cur, (int)o->disp);
         if (n) return ex(n);
         return exf("m%d", (int)o->disp);
@@ -562,7 +564,7 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
         int k = (int)(o->disp / 8);
         if (k < d->nstk) return ex(d->stk[d->nstk - 1 - k].s);
     }
-    if (o->base == 5 && o->index != IR_NOREG) {
+    if (rbpf && o->index != IR_NOREG) {
         Slot *bs = slot_at(d->cur, (int)o->disp);
         const char *base = bs ? bs->name : NULL;
         if (bs && d->bound > bs->alen) bs->alen = d->bound;
@@ -583,7 +585,7 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
         ex_free(ix);
         if (base) slot_hint(d->cur, (int)o->disp, 1);
     }
-    if (o->base != 5 && o->base != IR_NOREG && o->index == IR_NOREG && o->disp <= 0 && o->disp % 8 == 0 && d->has[o->base]) {
+    if (!rbpf && o->base != IR_NOREG && o->index == IR_NOREG && o->disp <= 0 && o->disp % 8 == 0 && d->has[o->base]) {
         for (int i = 0; i < d->cur->nslots; i++) {
             Slot *ps = &d->cur->slots[i];
             if (!ps->ptr_sid || strcmp(ps->name, d->reg[o->base].s)) continue;
@@ -592,11 +594,11 @@ static Ex mem_ex_(D *d, const IrOperand *o) {
                     return exf("%s->f%lld", ps->name, (long long)-o->disp);
         }
     }
-    if (o->base != 5 && o->base != IR_NOREG && d->has[o->base])
+    if (!rbpf && o->base != IR_NOREG && d->has[o->base])
         for (int i = 0; i < d->cur->nslots; i++)
             if (!strcmp(d->cur->slots[i].name, d->reg[o->base].s) && !d->cur->slots[i].alias[0])
                 slot_hint(d->cur, d->cur->slots[i].off, 2);
-    Ex b = o->base == 5 ? ex("fp") : (o->base != IR_NOREG ? getr(d, o->base) : ex("0"));
+    Ex b = rbpf ? ex("fp") : (o->base != IR_NOREG ? getr(d, o->base) : ex("0"));
     if (o->index != IR_NOREG) {
         Ex ix = getr(d, o->index);
         if (o->scale != 1) ix = ex_bin("*", ix, exf("%d", o->scale));
@@ -712,6 +714,7 @@ static Ex cond_from(D *d, const IrInsn *cmp, IrCond cc) {
     return v;
 }
 
+static int frame_has_fp(const IrFunc *f);
 static void classify(D *d) {
     for (int i = 0; i < d->nfun; i++) {
         Fun *fi = &d->fun[i];
@@ -782,13 +785,16 @@ static void classify(D *d) {
             if (!strcmp(fi->builtin, "exec")) fi->nargs = 1;
         }
 
+        /* rbp is a frame pointer in REX code and in foreign code that sets it from rsp */
+        int rbpfr = !d->foreign || frame_has_fp(f);
         /* Args: early stores of arg regs, or first uses. */
         if (f->nblocks) {
             const IrBlock *b0 = &f->blocks[0];
+            unsigned bwr = 0;   /* registers written so far: foreign code stores an arg register's own value only before that */
             for (int k = 0; k < b0->ninsns && k < 24; k++) {
                 const IrInsn *in = &b0->insns[k];
-                if (in->op == IR_STORE && in->dst.kind == IR_O_MEM && in->dst.base == 5 &&
-                    in->a.kind == IR_O_REG) {
+                if (rbpfr && in->op == IR_STORE && in->dst.kind == IR_O_MEM && in->dst.base == 5 &&
+                    in->a.kind == IR_O_REG && !(d->foreign && (bwr >> in->a.reg & 1))) {
                     for (int a = 0; a < 6; a++) if (in->a.reg == ARG[a]) {
                         if (a + 1 > fi->nargs) fi->nargs = a + 1;
                         add_slot(fi, (int)in->dst.disp, a);
@@ -797,15 +803,19 @@ static void classify(D *d) {
                 /* print_int style: mov rdi -> rax early */
                 if (in->op == IR_MOV && in->dst.kind == IR_O_REG && in->a.kind == IR_O_REG &&
                     in->a.reg == 7 && fi->nargs < 1) fi->nargs = 1;
+                if (in->op == IR_CALL || in->op == IR_SYSCALL) bwr = ~0u;
+                else if (in->dst.kind == IR_O_REG && in->dst.reg >= 0 && in->dst.reg < 32) bwr |= 1u << in->dst.reg;
             }
         }
         for (int b = 0; b < f->nblocks; b++)
             for (int k = 0; k < f->blocks[b].ninsns; k++) {
                 const IrOperand *ops[3] = { &f->blocks[b].insns[k].dst, &f->blocks[b].insns[k].a, &f->blocks[b].insns[k].b };
                 for (int o = 0; o < 3; o++) {
-                    if (ops[o]->kind == IR_O_MEM && ops[o]->base == 5 && ops[o]->index == IR_NOREG && ops[o]->disp < 0)
+                    if (rbpfr && ops[o]->kind == IR_O_MEM && ops[o]->base == 5 && ops[o]->index == IR_NOREG && ops[o]->disp < 0)
                         add_slot(fi, (int)ops[o]->disp, -1);
-                    if (d->foreign && ops[o]->kind == IR_O_MEM && ops[o]->base == 4 && ops[o]->index == IR_NOREG && ops[o]->disp >= 0)
+                    /* rsp slots; a negative offset is the red zone of a leaf, which
+                     * no call can clobber while the compiler keeps a value there */
+                    if (d->foreign && ops[o]->kind == IR_O_MEM && ops[o]->base == 4 && ops[o]->index == IR_NOREG && ops[o]->disp > -4096)
                         add_slot(fi, 1000000 + (int)ops[o]->disp, -1);
                 }
             }
@@ -939,9 +949,12 @@ static void store_ex(D *d, const IrInsn *in, Ex src, int src_imm, int depth) {
         return;
     }
     int si = -1;
-    if (in->dst.kind == IR_O_MEM && in->dst.base == 5 && in->dst.index == IR_NOREG)
+    if (in->dst.kind == IR_O_MEM && in->dst.base == 5 && in->dst.index == IR_NOREG && (!d->foreign || d->fp))
         for (int i = 0; i < d->cur->nslots; i++)
             if (d->cur->slots[i].off == (int)in->dst.disp && d->cur->slots[i].arg < 0) si = i;
+    if (d->foreign && !d->frame && in->dst.kind == IR_O_MEM && in->dst.base == 4 && in->dst.index == IR_NOREG)
+        for (int i = 0; i < d->cur->nslots; i++)
+            if (d->cur->slots[i].off == 1000000 + (int)in->dst.disp && d->cur->slots[i].arg < 0) si = i;
     int agg = si >= 0 ? agg_base(d->cur, si) : -1;
     if (agg >= 0 && !d->written[si] && !strcmp(src.s, "0") && src_imm) {
         /* zero-init of an aggregate cell: part of its declaration */
@@ -1202,7 +1215,7 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
         if (in->dst.kind == IR_O_REG) {
             if (in->a.kind == IR_O_MEM && in->a.base == IR_NOREG && in->a.index == IR_NOREG)
                 setr(d, in->dst.reg, daddr(d, in->a.disp));  /* absolute address (gmem offset for data) */
-            else if (in->a.kind == IR_O_MEM && in->a.base == 5 && in->a.index == IR_NOREG &&
+            else if (in->a.kind == IR_O_MEM && in->a.base == 5 && in->a.index == IR_NOREG && (!d->foreign || d->fp) &&
                      slot_at(d->cur, (int)in->a.disp) && slot_at(d->cur, (int)in->a.disp)->alias[0]) {
                 setr(d, in->dst.reg, exf("&%s", slot_at(d->cur, (int)in->a.disp)->name));
             } else {

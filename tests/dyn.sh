@@ -189,6 +189,21 @@ test $rc -ne 0 && grep -q "E401: .*past the bounds check" "$T/skip.err" && test 
 sed 's/jz\t\.Lload/jz\t.Ldef/' tests/jt/skip.s > "$T/noskip.s"
 gcc -pie -o "$T/noskip" "$T/noskip.s"
 ./rex match "$T/noskip" -o "$T/noskip.rex" >/dev/null 2>&1
+# leaf functions keep locals below rsp (the red zone): slots, not *(0 - 8)
+printf '%s\n' '__attribute__((noinline)) long f(long a){ volatile long m = a; return m * 3 + m; }' \
+    'int main(void){ long s = 0; for (int i = 0; i < 10; i++) s += f(i); return (int)(s & 255); }' > "$T/rz.c"
+for cc in gcc clang; do
+    $cc -O1 -no-pie -fno-pic -o "$T/rz" "$T/rz.c"
+    ./rex match "$T/rz" -o "$T/rz.rex" >/dev/null 2>&1
+done
+# without a frame pointer rbp is an ordinary register (tests/dec/rbp.c)
+gcc -O1 -no-pie -fno-pic -o "$T/rbp" tests/dec/rbp.c
+./rex match "$T/rbp" -o "$T/rbp.rex" >/dev/null 2>&1
+# clang -O0 stores rdx after a div wrote it: a saved value, not a third argument
+printf '%s\n' 'typedef unsigned long u64;' '__attribute__((noinline)) u64 md(u64 x){ return x % 251 + x / 977 + x / 10; }' \
+    'int main(void){ u64 s = 0; for (u64 x = 1; x < 3000000000000UL; x = x * 3 + 1) s += md(x); return (int)(s & 255); }' > "$T/md.c"
+clang -O0 -no-pie -fno-pic -o "$T/md" "$T/md.c"
+./rex match "$T/md" -o "$T/md.rex" >/dev/null 2>&1
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"
