@@ -177,6 +177,7 @@ int rex_elf_parse(const unsigned char *data, size_t size, RexElf *out, char *err
         h->offset = rd64(p + 8); h->vaddr = rd64(p + 16);
         h->filesz = rd64(p + 32); h->memsz = rd64(p + 40); h->align = rd64(p + 48);
         if (h->type == 2 || h->type == 3) e.dynamic = 1;   /* PT_DYNAMIC / PT_INTERP */
+        if (h->type == 3) e.interp = 1;
         if (h->type != REX_PT_LOAD) continue;
         if (!in_file(h->offset, h->filesz, size)) { rex_elf_free(&e); return fail(err, errlen, "segment %d out of bounds", i); }
         if (h->filesz > h->memsz) { rex_elf_free(&e); return fail(err, errlen, "segment %d file size exceeds memory size", i); }

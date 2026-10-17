@@ -40,6 +40,7 @@ enum {
     REX_E500_RECOMPILE    = 500,
     REX_E501_VERIFY       = 501,
     REX_E502_PE_REBUILD   = 502, /* cannot recompile PE yet */
+    REX_E503_DYNAMIC      = 503, /* rebuild: started by the dynamic loader */
 
     REX_E600_DECOMPILE    = 600,
     REX_E601_VERIFY       = 601,
@@ -75,6 +76,7 @@ static inline const char *rex_err_plain(int code) {
     case REX_E500_RECOMPILE:    return "I couldn't build the new program file.";
     case REX_E501_VERIFY:       return "The new program acted differently from the original when I ran both.";
     case REX_E502_PE_REBUILD:   return "I couldn't rebuild that Windows program correctly.";
+    case REX_E503_DYNAMIC:      return "This program loads the C library when it starts, and I can't rebuild that yet.";
     case REX_E600_DECOMPILE:    return "I couldn't turn this program back into readable code.";
     case REX_E601_VERIFY:       return "The code I got back acted differently from the original when I ran both.";
     case REX_E603_NOBUILD:      return "The code I got back doesn't build, so I can't check it against the original.";

@@ -263,6 +263,15 @@ for cc in gcc clang; do for o in O2 O3; do
     $cc -$o -no-pie -fno-pic -o "$T/divr11" tests/dec/divr11.c
     ./rex match "$T/divr11" -o "$T/divr11.rex" >/dev/null 2>&1
 done; done
+# a program the dynamic loader starts cannot be rebuilt (no loader in the
+# new file): compare and rebuild refuse with E503 (exit 247) up front
+printf '%s\n' 'int main(void){ return 42; }' > "$T/dl.c"
+for pie in "-no-pie -fno-pic" "-pie -fpie"; do
+    gcc -O2 $pie -o "$T/dl" "$T/dl.c"
+    set +e; ./rex compare "$T/dl" -o "$T/dl.out" 2> "$T/dl.err"; rc=$?; set -e
+    test $rc -eq 247 && grep -q "E503: .*dynamically linked" "$T/dl.err" && test $(wc -l < "$T/dl.err") -eq 2
+    ./rex match "$T/dl" -o "$T/dl.rex" >/dev/null 2>&1
+done
 # xmm values have no encoding in the rebuild yet: refused with E500, never
 # aliased onto a general register (tests/dec/ssefs.c)
 gcc -O3 -static -nostdlib -fno-pic -fno-stack-protector -o "$T/ssefs" tests/dec/ssefs.c

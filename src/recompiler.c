@@ -26,6 +26,13 @@ int rex_recompile(const char *inpath, const char *outpath, int debug) {
     char err[256];
     { int _rc = rex_bin_open(inpath, &e, err, sizeof(err)); if (_rc) { rex_refuse(err); return _rc; } }
     int is_pe = (e.type == 0xFE00);
+    if (!is_pe && e.interp) {
+        /* The rebuilt file has no dynamic loader: the C library is never
+         * mapped and its GOT slots stay empty, starting with the one _start
+         * calls. Say so before building, not as a codegen error. */
+        rex_errf(err, sizeof err, REX_E503_DYNAMIC, "%s is dynamically linked; the rebuilt program would have no loader to bring in the C library (try rex match)", inpath);
+        rex_refuse(err); rex_elf_free(&e); return REX_E503_DYNAMIC;
+    }
     { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { rex_refuse(err); rex_elf_free(&e); return _c; } }
     IrModule *m = x86_lift(&p, err, sizeof(err));
     if (!m) { rex_refuse(err); cfg_free(&p); rex_elf_free(&e); return REX_E300_LIFT; }

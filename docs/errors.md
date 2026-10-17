@@ -64,6 +64,13 @@ Each entry below is the plain sentence REX prints, then a one-line fix.
   Fix: run `rex rebuild --poison --debug` to see which function changed.
 - **E502** — I couldn't rebuild that Windows program correctly.
   Fix: use `rex tosource` to read it instead.
+- **E503** — This program loads the C library when it starts, and I can't rebuild that yet.
+  `rebuild` and `compare` write a new static file with no dynamic loader, so
+  the C library is never mapped and its GOT slots stay empty (the first is
+  the one `_start` calls). A program with a `PT_INTERP` header is refused
+  before building. Exit status 247. Fix: `rex match` recovers the source
+  instead (library calls there are `E602`).
+
 - **E600** — I couldn't turn this program back into readable code.
   Fix: try `rex tosource --c`.
 - **E601** — The code I got back acted differently from the original when I ran both.

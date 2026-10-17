@@ -47,6 +47,7 @@ typedef struct {
     RexPhdr *ph;
     RexShdr *sh;
     int dynamic;        /* has PT_INTERP or PT_DYNAMIC */
+    int interp;         /* has PT_INTERP: started by the dynamic loader */
     int pie;            /* ET_DYN program, read at base 0 */
     int nimp;
     RexImport *imp;
