@@ -250,7 +250,7 @@ static void gen_arith(Cg *g, const IrInsn *in) {
         alu_mem_reg(g, alu_base(in->op), 2, b, d);  /* add reg, [mem] */
         return;
     }
-    if (!(d->kind == IR_O_REG && a->kind == IR_O_REG && d->reg == a->reg)) { cgfail(g, "arith expects dst==a register"); return; }
+    if (!(d->kind == IR_O_REG && a->kind == IR_O_REG && d->reg == a->reg)) { cgfail(g, "math step expects its result to go in the same register as its first input (dst==a)"); return; }
     if (b->kind == IR_O_REG) gen_alu_rr(g, alu_base(in->op), d, b);
     else if (b->kind == IR_O_IMM) alu_imm(g, alu_ext(in->op), d->reg, d->width, b->imm);
     else cgfail(g, "arith operand");
@@ -330,7 +330,7 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
             /* lifter already emitted cqo via MOV/SAR; just idiv b */
             const IrOperand *b = &in->b;
             if (b->kind != IR_O_REG) { cgfail(g, "divisor must be a register"); break; }
-            if (in->op == IR_DIVS && !(k > 0 && bl->insns[k - 1].op == IR_REMS)) { cgfail(g, "divs without paired rems"); break; }
+            if (in->op == IR_DIVS && !(k > 0 && bl->insns[k - 1].op == IR_REMS)) { cgfail(g, "found a divide without its matching remainder step (divs/rems)"); break; }
             if (in->op == IR_REMS) { /* rem then div share one idiv; emit idiv only on REMS, DIVS is a no-op copy */
                 rex(g, 1, 0, 0, hi(b->reg)); eb(g, 0xf7); modrm_rr(g, 7, b->reg);
             }

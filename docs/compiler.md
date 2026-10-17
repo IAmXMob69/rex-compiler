@@ -82,31 +82,33 @@ Anything else returns `REX_BIN_ERR_UNRECOGNIZED` (exit 2) with `unrecognized bin
 
 Each failure prints a plain-English first line, then `E<nnn>: …` details. `rex explain E101` reprints the plain line. The process exit status is the code.
 
-| Code | Area | Meaning |
-| --- | --- | --- |
-| E100 | loader | unrecognized binary format (first bytes in hex) |
-| E101 | loader | PE feature not supported (legacy / catch-all) |
-| E102 | loader | ELF refused (class, endian, type, machine, …) |
-| E103 | loader | open/read failure |
-| E104 | loader | PE not x86-64 |
-| E105 | loader | PE not PE32+ |
-| E106 | loader | PE imports present |
-| E107 | loader | PE relocations present |
-| E108 | loader | PE TLS |
-| E109 | loader | PE .NET / CLR |
-| E110 | loader | PE packed / no executable section |
-| E200 | decode | unsupported or invalid opcode at address |
-| E300 | lift | cannot model instruction exactly |
-| E302 | lift | idiv / div shape (`div` needs `rdx` zeroed in the same block; 8/16-bit `div` refused) |
-| E400 | CFG | recovery failed |
-| E401 | CFG | jump table unclear (no bounds check, not read-only, or non-code entry); known non-PIE tables become a compare chain |
-| E402 | CFG / decompile | irreducible control flow in main (hard failure); in other functions, nesting too deep to structure prints an `// E402` comment at that point |
-| E403 | CFG | address outside executable code |
-| E500 | recompile | encode / layout failure (every code generator refusal) |
-| E501 | recompile | `--verify` / `--ir` mismatch |
-| E502 | recompile | PE rebuild failed / not clean |
-| E600 | decompile | recovery failure (also printed as a comment when a function's CFG cannot be built) |
-| E601 | decompile | `--verify` mismatch |
+| Code | Area | First line you see | Detail |
+| --- | --- | --- | --- |
+| E100 | loader | I do not recognize this file type. | unrecognized binary format (first bytes in hex) |
+| E101 | loader | This Windows program needs a feature I do not support yet. | PE feature not supported (legacy / catch-all) |
+| E102 | loader | This Linux-style program file is a kind I can't open. | ELF refused (class, endian, type, machine, …) |
+| E103 | loader | I could not read that file. | open/read failure |
+| E104 | loader | This Windows program is built for a different kind of processor than the one I handle (x86-64). | PE not x86-64 |
+| E105 | loader | This Windows program is 32-bit, and I only handle 64-bit ones. | PE not PE32+ |
+| E106 | loader | This Windows program borrows code from other files in a way I can't follow yet. | PE imports present |
+| E107 | loader | This Windows program needs its addresses adjusted when it loads, and I can't do that yet. | PE relocations present |
+| E108 | loader | This Windows program keeps separate data for each task it runs at once, and I can't handle that yet. | PE TLS |
+| E109 | loader | This is a .NET program, and I only read programs built to run straight on the processor. | PE .NET / CLR |
+| E110 | loader | This program looks squeezed or scrambled, so I won't guess what it does. | PE packed / no executable section |
+| E200 | decode | I found a processor instruction I don't know yet. | unsupported or invalid opcode at address |
+| E201 | decode | The file ends in the middle of an instruction. | instruction bytes cut off |
+| E300 | lift | I couldn't translate that instruction into my own working format. | cannot model instruction exactly |
+| E301 | lift | I lost track of the processor's true/false flags at this spot. | flags not modeled here |
+| E302 | lift | This divide step is written in a way I don't handle yet. | idiv / div shape (`div` needs `rdx` zeroed in the same block; 8/16-bit `div` refused) |
+| E400 | CFG | I couldn't map out all the paths this program can take. | recovery failed |
+| E401 | CFG | The program jumps to a spot it only figures out while running, so I can't follow it. | jump table unclear (no bounds check, not read-only, or non-code entry); known non-PIE tables become a compare chain |
+| E402 | CFG / decompile | This program's paths are too tangled for me to follow right now. | irreducible control flow in main (hard failure); in other functions, nesting too deep to structure prints an `// E402` comment at that point |
+| E403 | CFG | That address isn't in the part of the file that holds code. | address outside executable code |
+| E500 | recompile | I couldn't build the new program file. | encode / layout failure (every code generator refusal) |
+| E501 | recompile | The new program acted differently from the original when I ran both. | `--verify` / `--ir` mismatch |
+| E502 | recompile | I couldn't rebuild that Windows program correctly. | PE rebuild failed / not clean |
+| E600 | decompile | I couldn't turn this program back into readable code. | recovery failure (also printed as a comment when a function's CFG cannot be built) |
+| E601 | decompile | The code I got back acted differently from the original when I ran both. | `--verify` mismatch |
 
 No silent partial output: a failure returns the code and prints the message. `--verify` on `recompile` / `decompile` runs both sides with no args and compares exit status plus combined stdout/stderr. `compare --ir` / `match --ir` also lift both sides and compare a normalized dump of `main` (identity `mov`, call return addresses, and rip displacements are stripped).
 

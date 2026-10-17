@@ -2330,11 +2330,11 @@ static void print_help(void) {
         "\n"
         "Everyday commands:\n"
         "  rex run <file.rex>                 compile and run\n"
-        "  rex build <file.rex> [-o bin]      make a binary (default a.out)\n"
+        "  rex build <file.rex> [-o bin]      make a program (default a.out)\n"
         "  rex look <file>                    peek at headers\n"
         "  rex show <file>                    show the instructions\n"
         "  rex rebuild <file> [-o out]        rebuild from machine IR\n"
-        "  rex tosource <file> [-o out.rex]   turn a binary back into .rex\n"
+        "  rex tosource <file> [-o out.rex]   turn a program back into .rex\n"
         "  rex undo <file> [-o out.rex]       same as tosource\n"
         "  rex compare <file> [-o out]        rebuild and check it matches\n"
         "  rex compare --ir <file>           same, but also compare the machine IR\n"
@@ -2452,7 +2452,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
             else in = argv[i];
         }
-        if (!in) { fprintf(stderr, "rex: compare needs a binary\n"); return 2; }
+        if (!in) { fprintf(stderr, "rex: compare needs a program file\n"); return 2; }
         int rc = rex_recompile(in, out, debug);
         if (rc) return rc;
         char err[256];
@@ -2461,9 +2461,9 @@ int main(int argc, char **argv) {
         if (want_ir) {
             rc = rex_verify_ir(in, out, err, sizeof(err));
             if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
-            fprintf(stderr, "rex: compare: ok — the new binary and its IR match\n");
+            fprintf(stderr, "rex: compare: ok — the new program and its IR match\n");
         } else {
-            fprintf(stderr, "rex: compare: ok — the new binary matches\n");
+            fprintf(stderr, "rex: compare: ok — the new program matches\n");
         }
         return 0;
     }
@@ -2476,7 +2476,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
             else in = argv[i];
         }
-        if (!in) { fprintf(stderr, "rex: match needs a binary\n"); return 2; }
+        if (!in) { fprintf(stderr, "rex: match needs a program file\n"); return 2; }
         int rc = rex_decompile(in, out, verbose);
         if (rc) return rc;
         char tmp[] = "/tmp/rexverXXXXXX";
@@ -2549,7 +2549,7 @@ int main(int argc, char **argv) {
             rc = rex_verify_ir(in, out, err, sizeof(err));
             if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
         }
-        fprintf(stderr, "rex: compare: ok — the new binary%s matches\n", want_ir ? " and its IR" : "");
+        fprintf(stderr, "rex: compare: ok — the new program%s matches\n", want_ir ? " and its IR" : "");
         return 0;
     }
     if (strcmp(argv[1], "disasm") == 0) {
@@ -2618,6 +2618,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "rex: program did not exit normally\n");
         return 1;
     }
-    fprintf(stderr, "rex: unknown command '%s' (try rex help)\n", argv[1]);
+    fprintf(stderr, "rex: I don't know the command '%s'. Type `rex help` to see what I can do.\n", argv[1]);
     return 2;
 }

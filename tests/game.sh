@@ -68,13 +68,16 @@ grep -q '} while (' "$T/ch_O1.rex"
 asm() { printf '%s\n' '.globl _start' '_start:' "$@" ' mov %eax,%edi' ' mov $60,%eax' ' syscall' > "$T/e.s"; gcc -static -nostdlib -no-pie -o "$T/e" "$T/e.s"; }
 asm ' mov $7,%ecx' ' mov $100,%eax' ' xor %edx,%edx' ' div %cl'
 ! ./rex rebuild "$T/e" -o "$T/e.re" 2> "$T/e.err"
-grep -q 'divide instruction' "$T/e.err" && grep -q 'E302' "$T/e.err"
+grep -q 'divide step' "$T/e.err" && grep -q 'E302' "$T/e.err"
 asm ' mov $1,%eax' ' shl $3,%ax'
 ! ./rex rebuild "$T/e" -o "$T/e.re" 2> "$T/e.err"
-grep -q 'could not write a new binary' "$T/e.err" && grep -q 'E500' "$T/e.err"
+grep -q "couldn't build the new program file" "$T/e.err" && grep -q 'E500' "$T/e.err"
 asm ' mov $39,%eax' ' syscall'
 ! ./rex compare "$T/e" -o "$T/e.re" 2> "$T/e.err"
-grep -q 'did not match' "$T/e.err" && grep -q 'E501' "$T/e.err"
+grep -q 'acted differently' "$T/e.err" && grep -q 'E501' "$T/e.err"
+# unknown command: plain reply pointing at help
+! ./rex frobnicate 2> "$T/u.err"
+grep -q "I don't know the command 'frobnicate'. Type \`rex help\`" "$T/u.err"
 # vector code stays an explicit refusal
 build gcc O2 entities
 ! ./rex decompile "$T/entities_gcc_O2" -o "$T/e.rex" 2> "$T/e.err"
