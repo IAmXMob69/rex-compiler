@@ -405,7 +405,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrLi
                     for (int q = q0; q < bl->first + bl->n && !bad; q++) {
                         const X86Insn *w = &f->insns[q];
                         if (w->addr == jt->at) break;
-                        if (w->op == X86_CALL || w->op == X86_SYSCALL || w->op == X86_CQO || w->op == X86_IDIV || w->op == X86_DIV ||
+                        if (w->op == X86_CALL || w->op == X86_SYSCALL || w->op == X86_CQO || w->op == X86_IDIV || w->op == X86_DIV || X86_IS_MUL1(w) ||
                             w->op == X86_XCHG || w->op == X86_POP || w->op == X86_LEAVE) {
                             if (w->op == X86_CALL || w->op == X86_SYSCALL || w->op == X86_XCHG || w->op == X86_POP || w->op == X86_LEAVE ||
                                 jt->breg == 0 || jt->breg == 2) bad = 1;
@@ -556,7 +556,7 @@ static int pie_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, in
             const X86Insn *w = &hist[k];
             if (w->op == X86_CMP || w->op == X86_TEST || w->op == X86_PUSH || w->nops < 1) continue;
             if (w->op == X86_JMP || w->op == X86_JCC || w->op == X86_CALL || w->op == X86_XCHG || w->op == X86_CQO ||
-                w->op == X86_IDIV || w->op == X86_DIV || w->op == X86_POP) break;
+                w->op == X86_IDIV || w->op == X86_DIV || X86_IS_MUL1(w) || w->op == X86_POP) break;
             if (w->ops[0].kind == XO_REG && !w->ops[0].xmm && w->ops[0].reg == vr) {
                 if (w->ops[0].size == 4 && !w->ops[0].high8) { zx = 1; dep = w->addr; }
                 break;
@@ -585,7 +585,7 @@ static int pie_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, in
         if (x->op == X86_NOP || x->op == X86_ENDBR) continue;
         if (x->op == X86_JMP || x->op == X86_JCC || x->op == X86_CALL || x->op == X86_RET || x->op == X86_PUSH ||
             x->op == X86_POP || x->op == X86_LEAVE || x->op == X86_XCHG || x->op == X86_SYSCALL || x->op == X86_SSE ||
-            x->op == X86_CQO || x->op == X86_IDIV || x->op == X86_DIV) return 1;
+            x->op == X86_CQO || x->op == X86_IDIV || x->op == X86_DIV || X86_IS_MUL1(x)) return 1;
         if (x->nops >= 1 && d->kind == XO_MEM && x->op != X86_CMP && x->op != X86_TEST) return 1;   /* a store */
         if (x->nops < 1 || d->kind != XO_REG || x->op == X86_CMP || x->op == X86_TEST) continue;
         if (d->xmm || d->high8 || d->size < 4 || d->reg < 0 || d->reg > 15) {

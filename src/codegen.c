@@ -293,6 +293,29 @@ static void gen_block(Cg *g, IrFunc *f, int bi) {
         case IR_ADDR: gen_lea(g, &in->dst, &in->a); break;
         case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR: gen_arith(g, in); break;
         case IR_SHL: case IR_SHR: case IR_SAR: gen_shift(g, in); break;
+        case IR_MULHU: case IR_MULHS: {
+            /* One-operand mul/imul as the lifter emits it: mulh rdx = rax, b then
+             * mul rax = rax, b at the same width. One instruction serves both. */
+            const IrOperand *b = &in->b;
+            const IrInsn *nx = k + 1 < bl->ninsns ? &bl->insns[k + 1] : NULL;
+            int w = in->dst.width;
+            int okb = (b->kind == IR_O_REG && b->reg != 2) ||
+                      (b->kind == IR_O_MEM && b->base != 2 && b->index != 2);
+            if (!okb || (w != 4 && w != 8) || b->width != w || in->dst.kind != IR_O_REG || in->dst.reg != 2 ||
+                in->a.kind != IR_O_REG || in->a.reg != 0 || in->a.width != w || !nx || nx->op != IR_MUL ||
+                nx->dst.kind != IR_O_REG || nx->dst.reg != 0 || nx->dst.width != w ||
+                nx->a.kind != IR_O_REG || nx->a.reg != 0 || nx->b.kind != b->kind || nx->b.width != w ||
+                (b->kind == IR_O_REG ? nx->b.reg != b->reg
+                                     : nx->b.base != b->base || nx->b.index != b->index || nx->b.scale != b->scale || nx->b.disp != b->disp)) {
+                cgfail(g, "high multiply without its low half (mulh rdx, rax then mul rax)");
+                break;
+            }
+            int ext = in->op == IR_MULHU ? 4 : 5;
+            if (b->kind == IR_O_REG) { rex(g, width_w(w), 0, 0, hi(b->reg)); eb(g, 0xf7); modrm_rr(g, ext, b->reg); }
+            else { mem_rex(g, w, 0, b, 0); eb(g, 0xf7); modrm_mem(g, ext, b); }
+            k++;                                    /* the low half is in rax already */
+            break;
+        }
         case IR_MUL: {
             const IrOperand *d = &in->dst;
             if (d->kind != IR_O_REG || d->width < 2) { cgfail(g, "imul destination must be a 16/32/64-bit register"); break; }

@@ -38,8 +38,12 @@ typedef enum {
     X86_CMOVCC,         /* cc in .cc; dst, src */
     X86_XCHG,           /* exchange dst, src */
     X86_SSE,            /* SSE move/zero; .cc holds an SSE_* sub-kind */
+    X86_MUL,            /* one operand: rdx:rax = rax * src (unsigned); one-operand X86_IMUL is the signed form */
     X86_OP_COUNT
 } X86Opcode;
+
+/* mul/imul with one operand: rdx:rax = rax * src, writing both implicitly */
+#define X86_IS_MUL1(in) ((in)->op == X86_MUL || ((in)->op == X86_IMUL && (in)->nops == 1))
 
 /* X86_SSE sub-kinds, stored in X86Insn.cc. Only data movement and the
  * xor-self zero idiom; packed arithmetic is not decoded. */

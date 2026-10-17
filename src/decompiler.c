@@ -199,6 +199,7 @@ typedef struct {
     int bound;          /* array length proven for the block being emitted */
     int nstruct;
     int need_udiv;      /* emit the udiv/urem helpers */
+    int need_mulh;      /* emit the umulh/smulh helpers (one-operand 64-bit mul) */
     int need_gfr;       /* global gfr hands a new frame block to a local */
     int frame;          /* foreign: current function's stack lives in heap block fr (0 = off, else half size) */
     int fp;             /* foreign: rbp is a real frame pointer (mov %rsp,%rbp), not a general callee-saved register */
@@ -1259,6 +1260,23 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             store_ex(d, in, ex_bin(bop(in->op), a, b), 0, depth);
         }
         break;
+    case IR_MULHU: case IR_MULHS:
+        /* high half of rax * b (lifted one-operand mul/imul); dst is a register */
+        if (in->dst.kind == IR_O_REG) {
+            Ex a = op_ex(d, &in->a), b = op_ex(d, &in->b);
+            if (in->dst.width == 8) {
+                d->need_mulh = 1;
+                setr(d, in->dst.reg, exf("%s(%s, %s)", in->op == IR_MULHU ? "umulh" : "smulh", a.s, b.s));
+                ex_free(a); ex_free(b);
+            } else {
+                /* 32 bits: the full product fits 64 bits (signed: exactly; unsigned: as bits) */
+                Ex m = exf("4294967295");
+                Ex p = in->op == IR_MULHU ? ex_bin("*", ex_bin("&", a, exf("4294967295")), ex_bin("&", b, exf("4294967295")))
+                                          : ex_bin("*", ex_sext(a, 4), ex_sext(b, 4));
+                setr(d, in->dst.reg, ex_bin("&", ex_bin(">>", p, exf("32")), m));
+            }
+        }
+        break;
     case IR_NEG: case IR_NOT:
         if (in->dst.kind == IR_O_REG)
             setr(d, in->dst.reg, ex_un(in->op == IR_NEG ? "-" : "~", op_ex(d, &in->a)));
@@ -2201,7 +2219,7 @@ static int quiet_cond(const IrFunc *f, G *g, int y, const LCtx *lc, int stop) {
     for (int k = 0; k < b->ninsns - 1; k++) {
         IrOp op = b->insns[k].op;
         if (op == IR_STORE || op == IR_CALL || op == IR_SYSCALL || op == IR_PUSH || op == IR_POP || op == IR_TRAP ||
-            op == IR_DIVS || op == IR_REMS || op == IR_DIVU || op == IR_REMU) return 0;
+            op == IR_DIVS || op == IR_REMS || op == IR_DIVU || op == IR_REMU || op == IR_MULHU || op == IR_MULHS) return 0;
         if (b->insns[k].dst.kind == IR_O_MEM) return 0;
         if (b->insns[k].dst.kind == IR_O_REG) wr |= 1u << b->insns[k].dst.reg;
     }
@@ -3074,6 +3092,25 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
             "    return q;\n"
             "}\n\n"
             "fn urem(a, b) { return a - udiv(a, b) * b; }\n\n");
+    if (d.need_mulh)
+        fprintf(out, "// high 64 bits of a 128-bit product (one-operand mul/imul)\n"
+            "fn umulh(a, b) {\n"
+            "    let m = 4294967295;\n"
+            "    let al = a & m;\n"
+            "    let ah = (a >> 32) & m;\n"
+            "    let bl = b & m;\n"
+            "    let bh = (b >> 32) & m;\n"
+            "    let lh = al * bh;\n"
+            "    let hl = ah * bl;\n"
+            "    let mid = ((al * bl >> 32) & m) + (lh & m) + (hl & m);\n"
+            "    return ah * bh + ((lh >> 32) & m) + ((hl >> 32) & m) + ((mid >> 32) & m);\n"
+            "}\n\n"
+            "fn smulh(a, b) {\n"
+            "    let h = umulh(a, b);\n"
+            "    if (a < 0) { h = h - b; }\n"
+            "    if (b < 0) { h = h - a; }\n"
+            "    return h;\n"
+            "}\n\n");
     if (d.need_gfr) fprintf(out, "let gfr = 0;%s\n", d.blob ? "" : "\n");
     if (d.blob) {
         fprintf(out, "let gmem = 0; // data sections 0x%llx..0x%llx\n\n", (unsigned long long)d.blo, (unsigned long long)d.bhi);

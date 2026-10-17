@@ -73,6 +73,35 @@ static void zext32(L *l, IrOperand d) {
     }
 }
 
+/* One-operand mul/imul: rdx:rax = rax * src, at 32 or 64 bits. Lifted as the
+ * high half (IR_MULHU/IR_MULHS into rdx) then the low half (IR_MUL into rax),
+ * both reading the original rax and src. A source the first write would
+ * change (rdx, or memory addressed through rdx) is first copied to the stack
+ * below the red zone (rsp - 136), which no compiled code uses: no register is
+ * borrowed, since a caller may keep any register the callee does not touch.
+ * The flags (CF/OF: high half not the extension of the low) are not
+ * modelled: a later use fails with E301. */
+enum { MUL_SPILL = -136 };
+static void lift_mul1(L *l, const X86Insn *in, IrOperand s, int sgn) {
+    int w = s.width;
+    (void)in;
+    if (w != 4 && w != 8) { lfail(l, w == 1 ? "8-bit one-operand mul is not supported" : "16-bit one-operand mul is not supported"); return; }
+    IrInsn *i;
+    if ((s.kind == IR_O_REG && s.reg == 2) || (s.kind == IR_O_MEM && (s.base == 2 || s.index == 2))) {
+        if (s.kind == IR_O_MEM) { i = emit(l, IR_LOAD); i->dst = ir_reg(2, w); i->a = s; zext32(l, ir_reg(2, w)); }
+        IrOperand sp = ir_mem(4, IR_NOREG, 1, MUL_SPILL, w);
+        i = emit(l, IR_STORE); i->dst = sp; i->a = ir_reg(2, w);
+        s = sp;
+    }
+    wrote(l, ir_reg(0, 8)); wrote(l, ir_reg(2, 8));
+    i = emit(l, sgn ? IR_MULHS : IR_MULHU);
+    i->dst = ir_reg(2, w); i->a = ir_reg(0, w); i->b = s;
+    i = emit(l, IR_MUL);
+    i->dst = ir_reg(0, w); i->a = ir_reg(0, w); i->b = s;
+    zext32(l, ir_reg(2, w)); zext32(l, ir_reg(0, w));
+    l->flags = FL_NONE;
+}
+
 static IrOp alu_op(X86Opcode op) {
     switch (op) {
     case X86_ADD: return IR_ADD; case X86_SUB: return IR_SUB; case X86_AND: return IR_AND;
@@ -213,7 +242,11 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
         if (in->op == X86_NEG) { l->flags = FL_RESULT; l->res = d; }
         zext32(l, d);
         break;
+    case X86_MUL:
+        lift_mul1(l, in, d, 0);
+        break;
     case X86_IMUL:
+        if (in->nops == 1) { lift_mul1(l, in, d, 1); break; }
         wrote(l, d);
         i = emit(l, IR_MUL);
         i->dst = d;
@@ -243,12 +276,12 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
                     if (m->op == X86_MOV && m->nops >= 2 && m->ops[0].kind == XO_REG && m->ops[0].reg == 2
                         && m->ops[1].kind == XO_REG && m->ops[1].reg == 0) { ok = rax_changed ? 0 : 1; break; }
                     int wr = m->nops > 0 && m->ops[0].kind == XO_REG ? m->ops[0].reg : -1;
-                    if (wr == 2 || wr == 0 || m->op == X86_CALL || m->op == X86_SYSCALL) break;
+                    if (wr == 2 || wr == 0 || m->op == X86_CALL || m->op == X86_SYSCALL || X86_IS_MUL1(m)) break;
                 }
                 break;
             }
             int wr = q->nops > 0 && q->ops[0].kind == XO_REG ? q->ops[0].reg : -1;
-            if (wr == 2 || q->op == X86_CALL || q->op == X86_SYSCALL || q->op == X86_IDIV || q->op == X86_DIV || q->op == X86_POP) break;
+            if (wr == 2 || q->op == X86_CALL || q->op == X86_SYSCALL || q->op == X86_IDIV || q->op == X86_DIV || X86_IS_MUL1(q) || q->op == X86_POP) break;
             if (wr == 0) rax_changed = 1;  /* fine for the xor edx form only */
         }
         if (!ok) { lfail(l, "idiv dividend high half (rdx) not from cqo or xor edx"); break; }
@@ -281,7 +314,7 @@ static void lift_insn(L *l, const X86Insn *prev, int last_in_block, int bindex) 
             if (q->op == X86_XOR && q->ops[0].kind == XO_REG && q->ops[1].kind == XO_REG && q->ops[0].reg == 2 && q->ops[1].reg == 2 && q->ops[0].size >= 4) { ok = 1; break; }
             if (q->op == X86_MOV && q->ops[0].kind == XO_REG && q->ops[0].reg == 2 && q->ops[0].size >= 4 && q->ops[1].kind == XO_IMM && q->ops[1].imm == 0) { ok = 1; break; }
             int wr = q->nops > 0 && q->ops[0].kind == XO_REG ? q->ops[0].reg : -1;
-            if (wr == 2 || q->op == X86_CALL || q->op == X86_SYSCALL || q->op == X86_IDIV || q->op == X86_DIV || q->op == X86_POP
+            if (wr == 2 || q->op == X86_CALL || q->op == X86_SYSCALL || q->op == X86_IDIV || q->op == X86_DIV || X86_IS_MUL1(q) || q->op == X86_POP
                 || q->op == X86_CQO || q->op == X86_XCHG) break;
         }
         if (!ok) { lfail(l, "div dividend high half (rdx) not zeroed by xor edx or mov edx,0"); break; }

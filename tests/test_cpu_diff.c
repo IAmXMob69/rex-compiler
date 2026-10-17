@@ -376,6 +376,64 @@ int main(void) {
                 g_cases++; if (q != mq || r != mr) g_fail++; else g_ok++;
             }
     }
+    {
+        /* one-operand mul/imul: rdx:rax = rax * src. Decode, then the host
+         * against the lift (IR_MULHU/IR_MULHS high half, IR_MUL low half) and
+         * against the decompiler's helpers as REX computes them (64-bit
+         * wrapping, arithmetic >>): umulh by 32-bit halves, smulh from umulh. */
+        struct { unsigned char b[4]; int n, op, nops, size, kind, reg; } dc[] = {
+            {{0x48,0xf7,0xe1}, 3, X86_MUL, 1, 8, XO_REG, 1},     /* mul %rcx */
+            {{0x48,0xf7,0xe9}, 3, X86_IMUL, 1, 8, XO_REG, 1},    /* imul %rcx */
+            {{0xf7,0xe1}, 2, X86_MUL, 1, 4, XO_REG, 1},          /* mul %ecx */
+            {{0xf7,0xea}, 2, X86_IMUL, 1, 4, XO_REG, 2},         /* imul %edx */
+            {{0x48,0xf7,0x22}, 3, X86_MUL, 1, 8, XO_MEM, -1},    /* mulq (%rdx) */
+            {{0x49,0xf7,0xe0}, 3, X86_MUL, 1, 8, XO_REG, 8},     /* mul %r8 */
+            {{0xf6,0xe1}, 2, X86_MUL, 1, 1, XO_REG, 1},          /* mul %cl (decoded; the lift refuses) */
+        };
+        for (size_t i = 0; i < sizeof dc / sizeof dc[0]; i++) {
+            X86Insn mi;
+            int n = x86_decode(dc[i].b, (size_t)dc[i].n, 0x1000, &mi);
+            g_cases++;
+            if (n != dc[i].n || (int)mi.op != dc[i].op || mi.nops != dc[i].nops || mi.ops[0].size != dc[i].size ||
+                (int)mi.ops[0].kind != dc[i].kind || (dc[i].reg >= 0 && mi.ops[0].reg != dc[i].reg)) {
+                if (g_fail < 20) printf("FAIL decode mul form %zu\n", i);
+                g_fail++;
+            } else g_ok++;
+        }
+        uint64_t rng = 0x5eed1234ULL;
+        size_t ne = sizeof(EDGES) / sizeof(*EDGES);
+        for (size_t t = 0; t < ne * ne + 2000; t++) {
+            uint64_t a = t < ne * ne ? EDGES[t / ne] : xr(&rng), b = t < ne * ne ? EDGES[t % ne] : xr(&rng);
+            if (t >= ne * ne && (t & 3) == 1) b >>= (xr(&rng) & 63);
+            /* host */
+            uint64_t hu, lu, hs, ls; uint32_t hu4, lu4, hs4, ls4;
+            lu = a; __asm__ volatile("mulq %2" : "+a"(lu), "=d"(hu) : "r"(b) : "cc");
+            ls = a; __asm__ volatile("imulq %2" : "+a"(ls), "=d"(hs) : "r"(b) : "cc");
+            lu4 = (uint32_t)a; __asm__ volatile("mull %2" : "+a"(lu4), "=d"(hu4) : "r"((uint32_t)b) : "cc");
+            ls4 = (uint32_t)a; __asm__ volatile("imull %2" : "+a"(ls4), "=d"(hs4) : "r"((uint32_t)b) : "cc");
+            /* the IR: exact high half, low half as IR_MUL */
+            uint64_t ehu = (uint64_t)(((unsigned __int128)a * b) >> 64), ehs = (uint64_t)(((__int128)(int64_t)a * (int64_t)b) >> 64);
+            uint64_t el = a * b;
+            uint32_t ehu4 = (uint32_t)(((uint64_t)(uint32_t)a * (uint32_t)b) >> 32);
+            uint32_t ehs4 = (uint32_t)((uint64_t)((int64_t)(int32_t)a * (int32_t)b) >> 32);
+            uint32_t el4 = (uint32_t)a * (uint32_t)b;
+            /* the decompiler's REX: umulh / smulh, and the 32-bit expressions */
+            int64_t A = (int64_t)a, B = (int64_t)b, m = 4294967295LL;
+            int64_t al = A & m, ah = (A >> 32) & m, bl = B & m, bh = (B >> 32) & m;
+            int64_t lh = (int64_t)((uint64_t)al * (uint64_t)bh), hl = (int64_t)((uint64_t)ah * (uint64_t)bl);
+            int64_t mid = (((int64_t)((uint64_t)al * (uint64_t)bl) >> 32) & m) + (lh & m) + (hl & m);
+            uint64_t ruh = (uint64_t)ah * (uint64_t)bh + (uint64_t)((lh >> 32) & m) + (uint64_t)((hl >> 32) & m) + (uint64_t)((mid >> 32) & m);
+            uint64_t rsh = ruh - (A < 0 ? b : 0) - (B < 0 ? a : 0);
+            int64_t p4 = (int64_t)((uint64_t)(A & m) * (uint64_t)(B & m));
+            uint32_t ruh4 = (uint32_t)((p4 >> 32) & m);
+            int64_t sa = (int64_t)(uint64_t)((uint64_t)(A & m) << 32) >> 32, sb = (int64_t)(uint64_t)((uint64_t)(B & m) << 32) >> 32;
+            uint32_t rsh4 = (uint32_t)(((sa * sb) >> 32) & m);
+            int bad = hu != ehu || lu != el || hs != ehs || ls != el || hu4 != ehu4 || lu4 != el4 || hs4 != ehs4 || ls4 != el4 ||
+                      ruh != hu || rsh != hs || ruh4 != hu4 || rsh4 != hs4;
+            g_cases++;
+            if (bad) { if (g_fail < 20) printf("FAIL mul a=%#" PRIx64 " b=%#" PRIx64 "\n", a, b); g_fail++; } else g_ok++;
+        }
+    }
     printf("cpu diff: %d ok, %d fail, %d cases\n", g_ok, g_fail, g_cases);
     return g_fail?1:0;
 }

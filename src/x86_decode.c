@@ -365,6 +365,8 @@ int x86_decode(const unsigned char *p, size_t avail, uint64_t addr, X86Insn *out
         case 0: set2(out, X86_TEST, e, imm_op(sz == 1 ? gets8(&r) : immz(&r, &c), sz)); break;
         case 2: set1(out, X86_NOT, e); break;
         case 3: set1(out, X86_NEG, e); break;
+        case 4: set1(out, X86_MUL, e); break;
+        case 5: set1(out, X86_IMUL, e); break;
         case 6: set1(out, X86_DIV, e); break;
         case 7: set1(out, X86_IDIV, e); break;
         default: goto bad;
@@ -457,7 +459,7 @@ static const char *names[X86_OP_COUNT] = {
     "cmp", "test", "inc", "dec", "neg", "not",
     "jmp", "j", "set", "call", "ret",
     "nop", "cqo", "syscall", "endbr64", "leave", "hlt", "ud2", "cmov", "xchg",
-    "sse",
+    "sse", "mul",
 };
 static const char *ccs[16] = { "o","no","b","ae","e","ne","be","a","s","ns","p","np","l","ge","le","g" };
 

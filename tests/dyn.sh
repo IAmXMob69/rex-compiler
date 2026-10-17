@@ -97,9 +97,9 @@ gcc -O1 -no-pie -fno-pic -s -o "$T/sp_gcc" "$T/sp.c"
 clang -O1 -no-pie -fno-pic -s -o "$T/sp_clang" "$T/sp.c"
 gcc -O1 -pie -fpie -s -o "$T/sp_pie" "$T/sp.c"
 for b in sp_gcc sp_clang sp_pie; do ./rex match "$T/$b" -o "$T/$b.rex" >/dev/null 2>&1; grep -q "^fn main" "$T/$b.rex"; done
-# (unsigned % constant is a one-operand mul, not decoded yet: if it is one day,
-# pick another instruction REX does not know)
-printf '%s\n' 'int main(int c, char **v){unsigned long s=(unsigned long)c*977;return (int)(s % 251);}' > "$T/um.c"
+# an instruction REX does not know (bswap) is E200 and no file; if REX learns
+# it one day, pick another
+printf '%s\n' 'int main(int c, char **v){unsigned long s=(unsigned long)c*977; __asm__("bswap %0" : "+r"(s)); return (int)(s >> 56);}' > "$T/um.c"
 gcc -O1 -no-pie -fno-pic -o "$T/um" "$T/um.c"
 set +e; ./rex tosource "$T/um" -o "$T/um.rex" 2> "$T/um.err"; rc=$?; set -e
 test $rc -ne 0 && grep -q "E200" "$T/um.err" && test ! -s "$T/um.rex" -o ! -e "$T/um.rex"
@@ -204,6 +204,35 @@ printf '%s\n' 'typedef unsigned long u64;' '__attribute__((noinline)) u64 md(u64
     'int main(void){ u64 s = 0; for (u64 x = 1; x < 3000000000000UL; x = x * 3 + 1) s += md(x); return (int)(s & 255); }' > "$T/md.c"
 clang -O0 -no-pie -fno-pic -o "$T/md" "$T/md.c"
 ./rex match "$T/md" -o "$T/md.rex" >/dev/null 2>&1
+# one-operand mul/imul (rdx:rax): every form over edge values, and what
+# compilers emit for unsigned divide by a constant and 128-bit products
+for cc in gcc clang; do for o in O0 O2; do
+    $cc -$o -no-pie -fno-pic -o "$T/mul" tests/dec/mul.c
+    ./rex match "$T/mul" -o "$T/mul.rex" >/dev/null 2>&1
+done; done
+printf '%s\n' 'typedef unsigned long u64; typedef unsigned __int128 u128; typedef __int128 i128;' \
+    '__attribute__((noinline)) u64 md(u64 x){ return x % 251 + x / 977 + x / 10; }' \
+    '__attribute__((noinline)) u64 hi(u64 a, u64 b){ return (u64)(((u128)a * b) >> 64); }' \
+    '__attribute__((noinline)) long shi(long a, long b){ return (long)(((i128)a * b) >> 64); }' \
+    'int main(void){ u64 s = 0, x = 0x9e3779b97f4a7c15UL;' \
+    '  for (int i = 0; i < 2000; i++) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; s = s * 31 + md(x) + hi(x, s | 1) + (u64)shi((long)x, (long)s); }' \
+    '  return (int)(s % 253); }' > "$T/m2.c"
+for cc in gcc clang; do for o in O0 O2; do
+    $cc -$o -no-pie -fno-pic -o "$T/m2" "$T/m2.c"
+    ./rex match "$T/m2" -o "$T/m2.rex" >/dev/null 2>&1
+done; done
+# rebuilt from the IR (one mul for the high/low pair); gcc keeps a loop
+# counter in r11 across the calls, so the lift may not borrow a register
+for cc in gcc clang; do
+    $cc -O2 -static -nostdlib -fno-pic -fno-stack-protector -o "$T/mulfs" tests/dec/mulfs.c 2>/dev/null
+    ./rex compare "$T/mulfs" -o "$T/mulfs.out" >/dev/null 2>&1
+done
+# 8-bit mul (ax = al * src) is refused at the lift, no file
+printf '%s\n' 'int main(int c, char **v){ unsigned char a = (unsigned char)(c + 200); unsigned short r;' \
+    '  __asm__("movb %1, %%al; mulb %%al" : "=a"(r) : "r"(a)); return r & 255; }' > "$T/mb.c"
+gcc -O1 -no-pie -fno-pic -o "$T/mb" "$T/mb.c"
+set +e; ./rex tosource "$T/mb" -o "$T/mb.rex" 2> "$T/mb.err"; rc=$?; set -e
+test $rc -ne 0 && grep -q "8-bit one-operand mul" "$T/mb.err" && test ! -e "$T/mb.rex"
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"
