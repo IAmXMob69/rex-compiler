@@ -24,13 +24,13 @@ int rex_recompile(const char *inpath, const char *outpath, int debug) {
     RexElf e;
     CfgProgram p;
     char err[256];
-    { int _rc = rex_bin_open(inpath, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: %s\n", err); return _rc; } }
+    { int _rc = rex_bin_open(inpath, &e, err, sizeof(err)); if (_rc) { rex_refuse(err); return _rc; } }
     int is_pe = (e.type == 0xFE00);
-    { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { fprintf(stderr, "rex: %s\n", err); rex_elf_free(&e); return _c; } }
+    { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { rex_refuse(err); rex_elf_free(&e); return _c; } }
     IrModule *m = x86_lift(&p, err, sizeof(err));
-    if (!m) { fprintf(stderr, "rex: %s\n", err); cfg_free(&p); rex_elf_free(&e); return REX_E300_LIFT; }
+    if (!m) { rex_refuse(err); cfg_free(&p); rex_elf_free(&e); return REX_E300_LIFT; }
     CgResult cg;
-    if (cg_emit_module(m, &cg, err, sizeof(err))) { fprintf(stderr, "rex: %s\n", err); ir_module_free(m); cfg_free(&p); rex_elf_free(&e); return REX_E500_RECOMPILE; }
+    if (cg_emit_module(m, &cg, err, sizeof(err))) { rex_refuse(err); ir_module_free(m); cfg_free(&p); rex_elf_free(&e); return REX_E500_RECOMPILE; }
 
     if (is_pe) {
         /* Simple PE32+ rebuild: keep original sections, append a new RX

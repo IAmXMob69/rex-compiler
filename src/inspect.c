@@ -29,7 +29,7 @@ static void pflags(uint32_t f, char *b) {
 int rex_cmd_inspect(const char *path) {
     RexElf e;
     char err[256];
-    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: %s\n", err); return _rc; } }
+    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { rex_refuse(err); return _rc; } }
     if (e.type == 0xFE00)
         printf("PE32+ x86-64\n");
     else
@@ -108,8 +108,8 @@ int rex_cmd_disasm_func(const char *path, const char *fname) {
     RexElf e;
     CfgProgram p;
     char err[256];
-    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: %s\n", err); return _rc; } }
-    { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { fprintf(stderr, "rex: %s\n", err); rex_elf_free(&e); return _c; } }
+    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { rex_refuse(err); return _rc; } }
+    { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { rex_refuse(err); rex_elf_free(&e); return _c; } }
     int rc = 0;
     if (!fname) {
         for (int i = 0; i < p.nfuncs; i++) print_func(&p.funcs[i]);
@@ -126,7 +126,7 @@ int rex_cmd_disasm_func(const char *path, const char *fname) {
 int rex_cmd_disasm(const char *path) {
     RexElf e;
     char err[256];
-    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: %s\n", err); return _rc; } }
+    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { rex_refuse(err); return _rc; } }
     for (int s = 0; s < e.nph; s++) {
         const RexPhdr *h = &e.ph[s];
         if (h->type != REX_PT_LOAD || !(h->flags & REX_PF_X) || h->filesz == 0) continue;
@@ -151,11 +151,11 @@ int rex_cmd_ir(const char *path, const char *fname) {
     RexElf e;
     CfgProgram p;
     char err[256];
-    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { fprintf(stderr, "rex: %s\n", err); return _rc; } }
-    { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { fprintf(stderr, "rex: %s\n", err); rex_elf_free(&e); return _c; } }
+    { int _rc = rex_bin_open(path, &e, err, sizeof(err)); if (_rc) { rex_refuse(err); return _rc; } }
+    { int _c = cfg_build(&e, &p, err, sizeof(err)); if (_c) { rex_refuse(err); rex_elf_free(&e); return _c; } }
     IrModule *m = x86_lift(&p, err, sizeof(err));
     int rc = 0;
-    if (!m) { fprintf(stderr, "rex: %s\n", err); rc = REX_E300_LIFT; }
+    if (!m) { rex_refuse(err); rc = REX_E300_LIFT; }
     else {
         int k = fname ? pick_func(&p, fname) : -1;
         if (fname && k < 0) { fprintf(stderr, "rex: ir: no function '%s'\n", fname); rc = 1; }

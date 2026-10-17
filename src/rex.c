@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include "rex_err.h"
 #include "verify.h"
+#define REX_COLOR_IMPL
+#include "rex_color.h"
 
 /* REX — a small native compiler for Arch.
  * Integer language, SysV AMD64, syscall-only runtime embedded in elf.c.
@@ -2324,6 +2326,24 @@ static char *read_file(const char *path, int *len) {
     return buf;
 }
 
+/* Print a refusal line. Byte-identical to "rex: <msg>\n" when color is off
+ * (tests pipe stderr, so color is off and output is unchanged). When color is
+ * on, the "rex:" prefix is bold and any E<code> token is bold red; the message
+ * text itself stays the terminal's default color (see color/SPEC.md). */
+void rex_refuse(const char *msg) {
+    if (!rex_color_enabled()) { fprintf(stderr, "rex: %s\n", msg); return; }
+    fputs("\033[1mrex:\033[0m ", stderr);
+    for (const char *p = msg; *p; ) {
+        if ((p[0] == 'E' || p[0] == 'W') && p[1] >= '0' && p[1] <= '9') {
+            const char *q = p + 1;
+            while (*q >= '0' && *q <= '9') q++;
+            if (*q == ':') { fprintf(stderr, "\033[1;31m%.*s\033[0m", (int)(q - p), p); p = q; continue; }
+        }
+        fputc(*p++, stderr);
+    }
+    fputc('\n', stderr);
+}
+
 static void print_help(void) {
     fprintf(stderr,
         "REX %s — compile, look inside, and rebuild programs\n"
@@ -2349,6 +2369,7 @@ static void print_help(void) {
         "  rex show --function F <file>       one function\n"
         "  rex ir [--function F] <file>       print machine IR\n"
         "  --verify on rebuild/tosource       same as compare / match\n"
+        "  --color=always|never|auto          colored diagnostics (auto: on if the terminal supports it)\n"
         "\n"
         "Tips: -o is optional. If something fails I print a short reason, then a code like E101.\n",
         REX_VERSION);
@@ -2429,6 +2450,20 @@ static const char *alias_cmd(const char *c) {
 }
 
 int main(int argc, char **argv) {
+    /* --color=always|never|auto (default auto): parse and strip it before dispatch
+     * so positional arguments are unaffected. */
+    rex_color_mode cmode = REX_COLOR_AUTO;
+    { int w = 1;
+      for (int i = 1; i < argc; i++) {
+          const char *a = argv[i];
+          if (!strcmp(a, "--color") || !strcmp(a, "--color=auto")) { cmode = REX_COLOR_AUTO; continue; }
+          if (!strcmp(a, "--color=always")) { cmode = REX_COLOR_ALWAYS; continue; }
+          if (!strcmp(a, "--color=never")) { cmode = REX_COLOR_NEVER; continue; }
+          argv[w++] = argv[i];
+      }
+      argc = w;
+    }
+    rex_color_init(cmode);
     if (argc < 2) usage();
     argv[1] = (char *)alias_cmd(argv[1]);
     if (!strcmp(argv[1], "help")) { print_help(); return 0; }
@@ -2457,10 +2492,10 @@ int main(int argc, char **argv) {
         if (rc) return rc;
         char err[256];
         rc = rex_verify_bins(in, out, err, sizeof(err));
-        if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+        if (rc) { rex_refuse(err); return rc; }
         if (want_ir) {
             rc = rex_verify_ir(in, out, err, sizeof(err));
-            if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+            if (rc) { rex_refuse(err); return rc; }
             fprintf(stderr, "rex: compare: ok — the new program and its IR match\n");
         } else {
             fprintf(stderr, "rex: compare: ok — the new program matches\n");
@@ -2484,11 +2519,11 @@ int main(int argc, char **argv) {
         if (compile_to(out, tmp)) { unlink(tmp); return 1; }
         char err[256];
         rc = rex_verify_bins(in, tmp, err, sizeof(err));
-        if (rc) { unlink(tmp); fprintf(stderr, "rex: %s\n", err); return rc; }
+        if (rc) { unlink(tmp); rex_refuse(err); return rc; }
         if (want_ir) {
             rc = rex_verify_ir(in, tmp, err, sizeof(err));
             unlink(tmp);
-            if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+            if (rc) { rex_refuse(err); return rc; }
             fprintf(stderr, "rex: match: ok — the recovered source and its IR match\n");
         } else {
             unlink(tmp);
@@ -2524,7 +2559,7 @@ int main(int argc, char **argv) {
         char err[256];
         rc = rex_verify_bins(in, tmp, err, sizeof(err));
         unlink(tmp);
-        if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+        if (rc) { rex_refuse(err); return rc; }
         fprintf(stderr, "rex: match: ok — the recovered source matches\n");
         return 0;
     }
@@ -2544,10 +2579,10 @@ int main(int argc, char **argv) {
         if (rc || !verify) return rc;
         char err[256];
         rc = rex_verify_bins(in, out, err, sizeof(err));
-        if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+        if (rc) { rex_refuse(err); return rc; }
         if (want_ir) {
             rc = rex_verify_ir(in, out, err, sizeof(err));
-            if (rc) { fprintf(stderr, "rex: %s\n", err); return rc; }
+            if (rc) { rex_refuse(err); return rc; }
         }
         fprintf(stderr, "rex: compare: ok — the new program%s matches\n", want_ir ? " and its IR" : "");
         return 0;

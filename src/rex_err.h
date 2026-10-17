@@ -77,6 +77,10 @@ static inline const char *rex_err_plain(int code) {
 }
 
 /* Write plain line + "E<code>: <fmt…>" into err. Returns code. */
+/* Color-aware refusal printer (defined in rex.c). Byte-identical to
+ * "rex: <msg>\n" when color is off. */
+void rex_refuse(const char *msg);
+
 static inline int rex_errf(char *err, size_t errlen, int code, const char *fmt, ...) {
     char body[160];
     va_list ap; va_start(ap, fmt); vsnprintf(body, sizeof(body), fmt, ap); va_end(ap);
