@@ -623,7 +623,7 @@ IrModule *x86_lift(const CfgProgram *p, char *err, size_t errlen) {
             l.block = b;
             l.bfirst = bl->first;
             l.flags = FL_NONE;
-            /* Inherit cmp flags from a unique fall-through predecessor that ended in jcc.
+            /* Inherit cmp flags from a unique predecessor that ended in jcc (either edge).
              * (cmp; je T; jg U  — the jg block still sees the cmp flags.) */
             int pred = -1, npred = 0;
             for (int p = 0; p < cf->nblocks; p++) {
@@ -638,7 +638,7 @@ IrModule *x86_lift(const CfgProgram *p, char *err, size_t errlen) {
                 const CfgBlock *pb = &cf->blocks[pred];
                 if (pb->n > 0) {
                     const X86Insn *last = &cf->insns[pb->first + pb->n - 1];
-                    if (last->op == X86_JCC && pb->nsucc == 2 && pb->succ[1] == b)
+                    if (last->op == X86_JCC && pb->nsucc == 2 && (pb->succ[1] == b || pb->succ[0] == b) && pb->succ[0] != pb->succ[1])
                         l.flags = FL_CMP;
                 }
             }

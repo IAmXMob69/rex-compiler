@@ -93,7 +93,8 @@ int cfg_find_func(const CfgProgram *p, uint64_t addr) {
 
 static int jump_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, CfgJumpTable *jt);
 static int pie_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, const X86Insn *done, int ndone, CfgJumpTable *jt);
-enum { HIST = 12 };   /* straight-line history kept for table matching */
+static int pie_table_entered(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, const X86Insn *done, int ndone, CfgJumpTable *jt);
+enum { HIST = 32 };   /* straight-line history kept for table matching */
 
 /* Function symbols a jmp may tail-call: STT_FUNC entries in code, except gcc's
  * .cold parts, which share their parent's frame and jump back into it. */
@@ -135,6 +136,46 @@ int cfg_is_tail(const CfgFunc *f, uint64_t insn_addr) {
     return 0;
 }
 
+/* Every way into block b (the table code) is a bounds check on the same
+ * register with the same bound: a ja that falls into it or a jbe that jumps
+ * to it, right after cmp vreg,n-1; a 32-bit compare needs a zero-extending
+ * write of vreg earlier in that block. No other edge and no table entry. */
+static int entered_bounded(const CfgFunc *f, int nb, int b, const CfgJumpTable *jt) {
+    uint64_t g = f->blocks[b].start;
+    int npred = 0;
+    for (int q = 0; q < f->njt; q++)
+        for (int t = 0; t < f->jt[q].n; t++) if (f->jt[q].targets[t] == g) return 0;
+    for (int i = 0; i < nb; i++) {
+        const CfgBlock *bl = &f->blocks[i];
+        int to = 0;
+        for (int s = 0; s < bl->nsucc; s++) if (bl->succ[s] == b) to = 1;
+        if (!to) continue;
+        npred++;
+        if (bl->n < 2) return 0;
+        const X86Insn *l = &f->insns[bl->first + bl->n - 1], *c = l - 1;
+        if (l->op != X86_JCC || l->ops[0].kind != XO_REL) return 0;
+        if (l->cc == 7) { if (i != b - 1 || l->ops[0].target == g) return 0; }
+        else if (l->cc == 6) { if (l->ops[0].target != g || i == b - 1) return 0; }
+        else return 0;
+        if (c->op != X86_CMP || c->ops[0].kind != XO_REG || c->ops[0].xmm || c->ops[0].high8 || c->ops[0].reg != jt->vreg ||
+            c->ops[0].size != jt->vsz || c->ops[1].kind != XO_IMM || c->ops[1].imm != jt->n - 1) return 0;
+        if (jt->vsz == 4) {
+            int zx = 0;
+            for (const X86Insn *w = c - 1; w >= &f->insns[bl->first]; w--) {
+                if (w->op == X86_CMP || w->op == X86_TEST || w->op == X86_PUSH || w->nops < 1) continue;
+                if (w->op == X86_JMP || w->op == X86_JCC || w->op == X86_CALL || w->op == X86_XCHG || w->op == X86_CQO ||
+                    w->op == X86_IDIV || w->op == X86_DIV || X86_IS_MUL1(w) || w->op == X86_POP) break;
+                if (w->ops[0].kind == XO_REG && !w->ops[0].xmm && w->ops[0].reg == jt->vreg) {
+                    zx = w->ops[0].size == 4 && !w->ops[0].high8;
+                    break;
+                }
+            }
+            if (!zx) return 0;
+        } else if (jt->vsz != 8) return 0;
+    }
+    return npred > 0;
+}
+
 static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrList *ft, char *err, size_t errlen) {
     Map seen = {0};
     AddrList work = {0}, leaders = {0};
@@ -174,6 +215,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrLi
                     int jr = jump_table(e, in, hist + nhist - h4, h4, &jt);
                     if (jr == 1) {
                         int pr = pie_table(e, in, hist, nhist, ins, n - 1, &jt);
+                        if (pr == 1 && nhist > 0) pr = pie_table_entered(e, in, hist, nhist, ins, n - 1, &jt);
                         if (pr != 1) jr = pr;
                     }
                     const X86Operand *jo = &in->ops[0];
@@ -346,6 +388,7 @@ static int build_func(const RexElf *e, CfgFunc *f, AddrList *calls, const AddrLi
              * the slot the bounded value was saved to) is in the ja's own block */
             if (jt->dep < pb->start) bad = 1;
         }
+        if (bad && b > 0 && f->blocks[b].end > jt->at && jt->vreg >= 0 && entered_bounded(f, nb, b, jt)) bad = 0;
         if (!bad && jt->hoisted) {
             /* The table address register was set by one lea outside the code
              * evaluated: that lea must dominate the jmp, and nothing on any path
@@ -663,7 +706,7 @@ static int pie_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, in
             jt->targets[k] = v;
         }
         jt->at = in->addr; jt->reg = jo->index; jt->n = n; jt->byaddr = 0; jt->guard = hist[ka].addr + (uint64_t)hist[ka].size;
-        jt->breg = -1; jt->dep = dep;
+        jt->breg = -1; jt->dep = dep; jt->vreg = bc->ops[0].kind == XO_REG ? bc->ops[0].reg : -1; jt->vsz = vsz;
         return 0;
     }
     int r = in->ops[0].reg;
@@ -687,7 +730,7 @@ static int pie_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, in
             jt->targets[k] = v;
         }
         jt->at = in->addr; jt->reg = r; jt->n = n; jt->byaddr = 1; jt->guard = hist[ka].addr + (uint64_t)hist[ka].size;
-        jt->breg = -1; jt->dep = dep;
+        jt->breg = -1; jt->dep = dep; jt->vreg = bc->ops[0].kind == XO_REG ? bc->ops[0].reg : -1; jt->vsz = vsz;
         return 0;
     }
     if (r < 0 || r > 15 || st[r] != PV_TGT) return 1;
@@ -716,7 +759,35 @@ static int pie_table(const RexElf *e, const X86Insn *in, const X86Insn *hist, in
     }
     jt->at = in->addr; jt->reg = r; jt->n = n; jt->byaddr = 1; jt->guard = hist[ka].addr + (uint64_t)hist[ka].size;
     jt->breg = breg; jt->base = t; jt->hoisted = breg == hoist; jt->dep = dep;
+    jt->vreg = bc->ops[0].kind == XO_REG ? bc->ops[0].reg : -1; jt->vsz = vsz;
     return 0;
+}
+
+/* The straight line before the jmp starts at a jbe target with no bounds check
+ * of its own (clang -O3 checks the index in each block that jumps to the
+ * table code). Match it as if a check on the jbe's compare came first; after
+ * the blocks are built, every way into the table code is shown to be such a
+ * check. */
+static int pie_table_entered(const RexElf *e, const X86Insn *in, const X86Insn *hist, int nhist, const X86Insn *done, int ndone, CfgJumpTable *jt) {
+    uint64_t s = hist[0].addr;
+    for (int k = 0; k < nhist; k++) if (hist[k].op == X86_JCC || hist[k].op == X86_JMP || hist[k].op == X86_CALL) return 1;
+    const X86Insn *jc = NULL, *cm = NULL;
+    for (int q = 0; q < ndone && !jc; q++)
+        if (done[q].op == X86_JCC && done[q].cc == 6 && done[q].ops[0].kind == XO_REL && done[q].ops[0].target == s) jc = &done[q];
+    if (!jc) return 1;
+    for (int q = 0; q < ndone; q++) if (done[q].addr + (uint64_t)done[q].size == jc->addr) cm = &done[q];
+    if (!cm || cm->op != X86_CMP || cm->ops[0].kind != XO_REG || cm->ops[0].xmm || cm->ops[0].high8 || cm->ops[1].kind != XO_IMM) return 1;
+    X86Insn h2[HIST + 3]; int m = 0;
+    if (cm->ops[0].size == 4) {
+        X86Insn zx = *cm;                       /* stands for the zero-extending write each entry is shown to have */
+        zx.op = X86_MOV; zx.nops = 2; zx.ops[1] = zx.ops[0];
+        h2[m++] = zx;
+    }
+    h2[m++] = *cm;
+    X86Insn ja = *jc; ja.cc = 7; ja.addr = s - (uint64_t)jc->size;
+    h2[m++] = ja;
+    for (int k = 0; k < nhist && m < HIST + 3; k++) h2[m++] = hist[k];
+    return pie_table(e, in, h2, m, done, ndone, jt);
 }
 
 static void cfg_func_free(CfgFunc *f) {

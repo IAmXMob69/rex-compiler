@@ -202,10 +202,36 @@ int main(void){
     return (int)(s % 253);
 }
 C
-for cc in gcc clang; do for o in O0 O2; do
+for cc in gcc clang; do for o in O0 O2 O3; do
     $cc -$o -pie -fpie -o "$T/sw2" "$T/sw2.c"
     ./rex match "$T/sw2" -o "$T/sw2.rex" >/dev/null 2>&1
 done; done
+# clang -O3 checks the bound of body's second table in each block that jumps
+# to the table code (a ja into it, two jbe to it); the same switches rebuilt
+for cc in gcc clang; do
+    $cc -O3 -no-pie -fno-pic -o "$T/sw2" "$T/sw2.c"
+    ./rex match "$T/sw2" -o "$T/sw2.rex" >/dev/null 2>&1
+    for o in O1 O3; do
+        $cc -$o -static -nostdlib -fno-pic -fno-stack-protector -o "$T/swfs" tests/dec/swfs.c 2>/dev/null
+        ./rex compare "$T/swfs" -o "$T/swfs.out" >/dev/null 2>&1
+    done
+done
+# a table entered from more than one block (tests/jt/multi.s): every way in
+# must be a check of the same zero-extended register against the same bound
+gcc -pie -o "$T/multi" tests/jt/multi.s
+./rex match "$T/multi" -o "$T/multi.rex" >/dev/null 2>&1
+jt_refused() {
+    gcc -pie -o "$T/jtv" "$T/jtv.s"
+    set +e; ./rex match "$T/jtv" -o "$T/jtv.rex" > /dev/null 2> "$T/jtv.err"; rc=$?; set -e
+    test $rc -ne 0 && grep -q "E401: .*indirect jump" "$T/jtv.err"
+}
+OTHER='lea\t1(%rdi), %ecx\n\tcmp\t$3, %ecx\n\tjbe\t.Lload'
+for to in 'lea\t1(%rdi), %ecx\n\tcmp\t$4, %ecx\n\tjbe\t.Lload' \
+          'lea\t1(%rdi), %rcx\n\tcmp\t$3, %ecx\n\tjbe\t.Lload' \
+          'lea\t1(%rdi), %ecx\n\tand\t$3, %ecx\n\tjmp\t.Lload'; do
+    python3 -c "import sys; s=open('tests/jt/multi.s').read(); a=sys.argv[1].encode().decode('unicode_escape'); b=sys.argv[2].encode().decode('unicode_escape'); assert a in s; open('$T/jtv.s','w').write(s.replace(a,b))" "$OTHER" "$to"
+    jt_refused
+done
 # a function main reaches is code that runs: one REX can't lift is an error,
 # never left out of the source (a non-PIE _start passes main in rdi)
 printf '%s\n' '__attribute__((noinline)) int mb(unsigned char a, unsigned char b){ unsigned short r; __asm__("mov %1, %%al; mulb %2; mov %%ax, %0" : "=r"(r) : "r"(a), "r"(b) : "ax", "cc"); return r; }' \

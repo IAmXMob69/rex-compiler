@@ -30,6 +30,7 @@ typedef struct {
     uint64_t base;          /* PIE table: the table address; entries are offsets from it */
     int hoisted;            /* PIE table: breg was set by a lea outside the straight-line code */
     uint64_t dep;           /* PIE table: earliest instruction before the ja the match relies on */
+    int vreg, vsz;          /* the bounded register and the compare's width (vreg -1: in memory) */
     uint64_t *targets;
 } CfgJumpTable;
 
