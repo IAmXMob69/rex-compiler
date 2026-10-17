@@ -2570,7 +2570,7 @@ int main(int argc, char **argv) {
         rc = rex_verify_bins(in, out, err, sizeof(err), REX_E501_VERIFY);
         if (rc) { rex_refuse(err); return rc; }
         if (want_ir) {
-            rc = rex_verify_ir(in, out, err, sizeof(err));
+            rc = rex_verify_ir(in, out, err, sizeof(err), REX_E501_VERIFY);
             if (rc) { rex_refuse(err); return rc; }
             fprintf(stderr, "rex: compare: ok — the new program and its IR match\n");
         } else {
@@ -2597,7 +2597,7 @@ int main(int argc, char **argv) {
         rc = rex_verify_bins(in, tmp, err, sizeof(err), REX_E601_VERIFY);
         if (rc) { unlink(tmp); rex_refuse(err); return rc; }
         if (want_ir) {
-            rc = rex_verify_ir(in, tmp, err, sizeof(err));
+            rc = rex_verify_ir(in, tmp, err, sizeof(err), REX_E601_VERIFY);
             unlink(tmp);
             if (rc) { rex_refuse(err); return rc; }
             fprintf(stderr, "rex: match: ok — the recovered source and its IR match\n");
@@ -2657,7 +2657,7 @@ int main(int argc, char **argv) {
         rc = rex_verify_bins(in, out, err, sizeof(err), REX_E501_VERIFY);
         if (rc) { rex_refuse(err); return rc; }
         if (want_ir) {
-            rc = rex_verify_ir(in, out, err, sizeof(err));
+            rc = rex_verify_ir(in, out, err, sizeof(err), REX_E501_VERIFY);
             if (rc) { rex_refuse(err); return rc; }
         }
         fprintf(stderr, "rex: compare: ok — the new program%s matches\n", want_ir ? " and its IR" : "");

@@ -176,7 +176,7 @@ static int lift_path(const char *path, IrModule **outm, CfgProgram *outcfg, char
     return 0;
 }
 
-int rex_verify_ir(const char *a, const char *b, char *err, size_t errlen) {
+int rex_verify_ir(const char *a, const char *b, char *err, size_t errlen, int code) {
     IrModule *ma = NULL, *mb = NULL;
     CfgProgram ca = {0}, cb = {0};
     int rc = lift_path(a, &ma, &ca, err, errlen);
@@ -186,7 +186,7 @@ int rex_verify_ir(const char *a, const char *b, char *err, size_t errlen) {
     const IrFunc *fa = pick_main(ma, &ca), *fb = pick_main(mb, &cb);
     if (!fa || !fb) {
         ir_module_free(ma); ir_module_free(mb); cfg_free(&ca); cfg_free(&cb);
-        return rex_errf(err, errlen, REX_E501_VERIFY, "could not find main to compare");
+        return rex_errf(err, errlen, code, "could not find main to compare");
     }
     char *sa = NULL, *sb = NULL; size_t na = 0, nb = 0;
     rc = dump_func(ma, fa, &sa, &na, err, errlen);
@@ -199,7 +199,7 @@ int rex_verify_ir(const char *a, const char *b, char *err, size_t errlen) {
     }
     const char *pa = sa, *pb = sb;
     int line = 1;
-    rc = rex_errf(err, errlen, REX_E501_VERIFY, "IR differs in main");
+    rc = rex_errf(err, errlen, code, "IR differs in main");
     for (;;) {
         const char *ea = strchr(pa, '\n'), *eb = strchr(pb, '\n');
         size_t la = ea ? (size_t)(ea - pa) : strlen(pa);
@@ -208,13 +208,13 @@ int rex_verify_ir(const char *a, const char *b, char *err, size_t errlen) {
             char da[80], db[80];
             snprintf(da, sizeof(da), "%.*s", (int)(la < 70 ? la : 70), pa);
             snprintf(db, sizeof(db), "%.*s", (int)(lb < 70 ? lb : 70), pb);
-            rc = rex_errf(err, errlen, REX_E501_VERIFY,
+            rc = rex_errf(err, errlen, code,
                           "IR differs at line %d: got \"%s\" vs \"%s\"", line, da, db);
             break;
         }
         if (!ea && !eb) break;
         if (!ea || !eb) {
-            rc = rex_errf(err, errlen, REX_E501_VERIFY, "IR length differs after line %d", line);
+            rc = rex_errf(err, errlen, code, "IR length differs after line %d", line);
             break;
         }
         pa = ea + 1; pb = eb + 1; line++;
