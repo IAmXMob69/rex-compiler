@@ -119,9 +119,15 @@ static Ex ex_un(const char *op, Ex a) {
         char *l, *o, *r;
         if (split_top(a.s, &l, &o, &r)) {
             const char *neg = rel_neg(o);
-            Ex res = neg ? exf("(%s %s %s)", l, neg, r) : (Ex){ NULL };
+            if (neg) { Ex res = exf("(%s %s %s)", l, neg, r); free(l); free(o); free(r); ex_free(a); return res; }
+            /* De Morgan: push the ! inside && / || so a negated chain reads as
+             * one short-circuit condition instead of !(... || ...). */
+            if (!strcmp(o, "||") || !strcmp(o, "&&")) {
+                const char *dual = o[0] == '|' ? "&&" : "||";
+                Ex res = ex_bin(dual, ex_un("!", ex(l)), ex_un("!", ex(r)));
+                free(l); free(o); free(r); ex_free(a); return res;
+            }
             free(l); free(o); free(r);
-            if (neg) { ex_free(a); return res; }
         }
         long long v;
         if (is_num(a.s, &v)) { ex_free(a); return exf("%d", v == 0); }

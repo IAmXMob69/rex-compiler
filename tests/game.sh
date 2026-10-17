@@ -66,6 +66,8 @@ for o in O0 O1; do
 done
 grep -q ' && \| || ' "$T/ch_O0.rex"
 grep -q '} while (' "$T/ch_O1.rex"
+# De Morgan: a negated || chain reads as a short-circuit && condition, no !( ... || ... )
+! grep -qE '!\(.*\|\|' "$T/ch_O0.rex"
 # E-code regressions: each refusal prints a plain line and its code
 asm() { printf '%s\n' '.globl _start' '_start:' "$@" ' mov %eax,%edi' ' mov $60,%eax' ' syscall' > "$T/e.s"; gcc -static -nostdlib -no-pie -o "$T/e" "$T/e.s"; }
 asm ' mov $7,%ecx' ' mov $100,%eax' ' xor %edx,%edx' ' div %cl'
