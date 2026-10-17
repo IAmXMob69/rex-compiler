@@ -173,6 +173,7 @@ typedef struct {
     int nslots;
     int kind;       /* 0 user, 1 start, 2 main, 3 runtime */
     const char *builtin; /* print/putc/alloc/free/... */
+    unsigned clob;  /* caller-saved registers this function may modify (transitively) */
 } Fun;
 
 typedef struct {
@@ -218,6 +219,57 @@ static const int ARG[6] = { 7, 6, 2, 1, 8, 9 };
 static Fun *fby(D *d, uint64_t a) {
     for (int i = 0; i < d->nfun; i++) if (d->fun[i].addr == a) return &d->fun[i];
     return NULL;
+}
+
+/* Caller-saved registers an unknown callee may clobber: rax rcx rdx rsi rdi r8-r11. */
+#define CLOB_SAVED ((1u<<0)|(1u<<1)|(1u<<2)|(1u<<6)|(1u<<7)|(1u<<8)|(1u<<9)|(1u<<10)|(1u<<11))
+
+/* For each function, the set of caller-saved registers it may modify, including
+ * through the functions it calls (fixpoint over the call graph). A call to a
+ * builtin, an external address or a register is treated as a full clobber. A
+ * value a caller leaves in a caller-saved register across a call to a function
+ * that provably never writes that register survives the call. */
+static void compute_clobbers(D *d) {
+    int n = d->nfun;
+    for (int i = 0; i < n; i++) {
+        const IrFunc *f = &d->m->funcs[i];
+        unsigned b = 0;
+        for (int bl = 0; bl < f->nblocks; bl++) {
+            const IrBlock *B = &f->blocks[bl];
+            for (int k = 0; k < B->ninsns; k++) {
+                const IrInsn *in = &B->insns[k];
+                if (in->op == IR_SYSCALL) b |= CLOB_SAVED;
+                if (in->op == IR_CALL) {
+                    if (in->a.kind == IR_O_ADDR) {
+                        Fun *t = fby(d, in->a.addr);
+                        if (!t || t->kind == 3) b |= CLOB_SAVED;  /* builtin/external */
+                    } else b |= CLOB_SAVED;                       /* indirect */
+                }
+                if (in->dst.kind == IR_O_REG && in->dst.reg >= 0 && in->dst.reg < 16)
+                    b |= 1u << in->dst.reg;
+            }
+        }
+        d->fun[i].clob = b & CLOB_SAVED;
+    }
+    for (int it = 0; it <= n; it++) {
+        int changed = 0;
+        for (int i = 0; i < n; i++) {
+            if (d->fun[i].clob == CLOB_SAVED) continue;
+            const IrFunc *f = &d->m->funcs[i];
+            unsigned m = d->fun[i].clob;
+            for (int bl = 0; bl < f->nblocks && m != CLOB_SAVED; bl++) {
+                const IrBlock *B = &f->blocks[bl];
+                for (int k = 0; k < B->ninsns; k++) {
+                    const IrInsn *in = &B->insns[k];
+                    if (in->op != IR_CALL || in->a.kind != IR_O_ADDR) continue;
+                    Fun *t = fby(d, in->a.addr);
+                    if (t && t->kind != 3) m |= t->clob;
+                }
+            }
+            if (m != d->fun[i].clob) { d->fun[i].clob = m; changed = 1; }
+        }
+        if (!changed) break;
+    }
 }
 
 static void emit(D *d, int depth, const char *fmt, ...);
@@ -1134,8 +1186,17 @@ static void step(D *d, const IrInsn *in, int depth, int *emit_call) {
             }
             emit(d, depth, "v0 = %s;", call.s);
             ex_free(call);
+            /* Clobber only what the callee may write; a known function that
+             * never touches a caller-saved register leaves the caller's value
+             * in it alive across the call. rax always carries the result (v0). */
+            unsigned cm = (t && t->kind != 3) ? (t->clob | 1u) : CLOB_SAVED;
             static const int clob[] = { 0, 1, 2, 6, 7, 8, 9, 10, 11 };
-            for (size_t c = 0; c < sizeof clob / sizeof clob[0]; c++) { int r = clob[c]; if (d->has[r]) ex_free(d->reg[r]); d->has[r] = 0; }
+            for (size_t c = 0; c < sizeof clob / sizeof clob[0]; c++) {
+                int r = clob[c];
+                if (!(cm & (1u << r))) continue;
+                if (d->has[r]) ex_free(d->reg[r]);
+                d->has[r] = 0;
+            }
         } else {
             setr(d, 0, call);
             if (emit_call) *emit_call = 1;
@@ -2513,6 +2574,7 @@ int rex_decompile(const char *inpath, const char *outpath, int verbose) {
     d.fun = calloc((size_t)m->nfuncs, sizeof(Fun));
     d.nfun = m->nfuncs;
     classify(&d);
+    compute_clobbers(&d);
     if (d.foreign) foreign_args(&d);
     blob_scan(&d);
 

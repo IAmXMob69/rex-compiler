@@ -100,6 +100,11 @@ for o in O0 O1; do
 done
 grep -q ' && \| || ' "$T/ch_O0.rex"
 grep -q '} while (' "$T/ch_O1.rex"
+# gcc -O2 keeps the loop counter in edx across calls to leaf functions that
+# never write edx; the i++ (add edx,1) must survive the call or the loop
+# counter is lost and the loop never ends.
+"gcc" "-O2" $G -o "$T/chains_O2" tests/chains.c
+./rex match "$T/chains_O2" -o "$T/ch_O2.rex" >/dev/null
 # De Morgan: a negated || chain reads as a short-circuit && condition, no !( ... || ... )
 ! grep -qE '!\(.*\|\|' "$T/ch_O0.rex"
 # E-code regressions: each refusal prints a plain line and its code
