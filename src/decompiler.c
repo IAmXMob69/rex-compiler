@@ -682,7 +682,21 @@ static Ex cond_from(D *d, const IrInsn *cmp, IrCond cc) {
         }
         if (d->foreign && w < 8 && sgn)
             return ex_bin(cop(cc), ex_sext(opnd(d, cmp, 0), w), ex_sext(opnd(d, cmp, 1), w));
-        return ex_bin(cop(cc), opnd(d, cmp, 0), opnd(d, cmp, 1));
+        Ex a = opnd(d, cmp, 0), b = opnd(d, cmp, 1);
+        if (d->foreign && w < 8) {
+            /* equality and unsigned order compare the low w bytes, and registers
+             * print masked to them: an immediate must be masked too (cmp $-1,%esi
+             * is esi == 0xffffffff, never == -1) */
+            Ex *s2[2] = { &a, &b };
+            for (int k = 0; k < 2; k++) {
+                long long v;
+                if (!is_num(s2[k]->s, &v)) continue;
+                unsigned long long m = (1ULL << (8 * w)) - 1, u = (unsigned long long)v & m;
+                if (u == (unsigned long long)v) continue;
+                ex_free(*s2[k]); *s2[k] = exf("%llu", u);
+            }
+        }
+        return ex_bin(cop(cc), a, b);
     }
     Ex v;
     if (cmp->a.kind == cmp->b.kind && cmp->a.kind == IR_O_REG && cmp->a.reg == cmp->b.reg) v = opnd(d, cmp, 0);

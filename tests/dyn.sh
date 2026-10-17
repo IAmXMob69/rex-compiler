@@ -109,6 +109,14 @@ printf '%s\n' 'volatile int z;' 'int main(void){ while (!z) ; return 0; }' > "$T
 gcc -O1 -no-pie -fno-pic -o "$T/spin" "$T/spin.c"
 set +e; ./rex match "$T/spin" -o "$T/spin.rex" 2> "$T/spin.err"; rc=$?; set -e
 test $rc -ne 0 && grep -q "did not finish in 20 s" "$T/spin.err"
+# a 32-bit compare with a negative immediate (cmp $-1,%esi) is a compare of
+# the masked register with 0xffffffff, not with -1 (which never held)
+printf '%s\n' '__attribute__((noinline)) int t(int a, int e){ a--; if (e == -1) { a += 4; a ^= 0x55; return a*5+3; } return 0; }' \
+    '__attribute__((noinline)) int get(int v){ return v; }' 'int main(void){ return t(get(-7), get(-1)) & 0xff; }' > "$T/neg.c"
+for cc in gcc clang; do
+    $cc -O1 -no-pie -fno-pic -o "$T/neg_$cc" "$T/neg.c"
+    ./rex match "$T/neg_$cc" -o "$T/neg_$cc.rex" >/dev/null 2>&1
+done
 # a shared library is not a program
 gcc -shared -fPIC -o "$T/lib.so" "$T/sum.c"
 ! ./rex look "$T/lib.so" 2> "$T/so.err"
